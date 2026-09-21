@@ -1,0 +1,32 @@
+# Binaries
+bin/
+*.exe
+/velox
+/velox_*
+*.dll
+*.so
+*.dylib
+
+# Test
+coverage.out
+coverage.html
+*.test
+
+# Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Velox data (local)
+*.db
+*.db-wal
+*.db-shm
