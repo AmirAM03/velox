@@ -1,0 +1,66 @@
+# Velox Configuration Template
+# Place at /etc/velox/config.yaml or ~/.velox/config.yaml
+
+# Data directory for SQLite database and state
+data_dir: "/var/lib/velox"
+
+# Logging: debug, info, warn, error
+log_level: "info"
+log_json: false
+
+# Multi-stage testing pipeline settings
+pipeline:
+  # Concurrency limits per stage
+  stage0_workers: 2000      # DNS + TCP probe workers
+  stage1_workers: 500       # TLS / REALITY handshake workers
+  stage2_workers: 150       # Functional proxy HTTP test workers
+  stage3_workers: 20        # Deep quality & throughput workers
+
+  # Timeouts
+  stage0_timeout: "3s"
+  stage1_timeout: "5s"
+  stage2_timeout: "10s"
+  stage3_timeout: "30s"
+
+  # Adaptive concurrency (AIMD)
+  adaptive_concurrency: true
+  timeout_rate_high: 0.15   # Back off workers if timeouts exceed 15%
+  timeout_rate_low: 0.05    # Increase workers if timeouts are below 5%
+
+  # Rate limiting per host
+  per_host_rate_limit: 5
+  per_host_cooldown: "500ms"
+
+# Local mixed proxy server settings
+proxy:
+  listen_addr: "127.0.0.1"
+  mixed_port: 1080          # Handles both SOCKS5 and HTTP proxy on single port
+  warm_pool_size: 5         # Number of top configs kept warm for failover
+  health_interval: "30s"    # Health check frequency on active config
+  fail_threshold: 2         # Consecutive failures before auto-failover
+
+# Test targets for real delay and functional validation
+targets:
+  # URLs to probe in Stage 2 (first success marks config functional)
+  urls:
+    - "https://www.gstatic.com/generate_204"
+    - "https://cp.cloudflare.com/generate_204"
+  expect_status:
+    - 200
+    - 204
+  speed_test_url: "https://speed.cloudflare.com/__down?bytes=10485760"
+  dns_test_host: "google.com"
+
+# Composite scoring weights (lower score = better config)
+scoring:
+  weight_latency: 0.30      # Weight for P95 latency
+  weight_success: 0.30      # Weight for success rate
+  weight_throughput: 0.15   # Weight for throughput
+  weight_stability: 0.15    # Weight for stability penalty
+  weight_recency: 0.10      # Weight for test recency
+  stability_decay: 0.8      # Exponential decay rate for flaky configs
+
+# Debug options
+debug:
+  pprof_enabled: false
+  pprof_addr: "127.0.0.1:6060"

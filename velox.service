@@ -1,0 +1,23 @@
+[Unit]
+Description=Velox — High-Performance V2Ray Proxy Engine
+Documentation=https://github.com/AmirAM03/velox
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/lib/velox
+ExecStart=/usr/local/bin/velox connect --config /etc/velox/config.yaml
+Restart=always
+RestartSec=5s
+LimitNOFILE=65535
+LimitNPROC=65535
+
+# Sandboxing & Security
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
