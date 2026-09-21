@@ -34,15 +34,10 @@ your custom target URLs, and connect through the fastest working proxy.`,
 	}
 
 	// Persistent flags (available to all subcommands)
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ~/.velox/config.yaml)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ~/.velox/config.yaml or /etc/velox/config.yaml)")
 	rootCmd.PersistentFlags().String("log-level", "info", "log level (debug, info, warn, error)")
 	rootCmd.PersistentFlags().Bool("log-json", false, "output logs in JSON format")
-	rootCmd.PersistentFlags().String("data-dir", "", "data directory (default: ~/.velox)")
-
-	// Bind flags to viper
-	viper.BindPFlag("log_level", rootCmd.PersistentFlags().Lookup("log-level"))
-	viper.BindPFlag("log_json", rootCmd.PersistentFlags().Lookup("log-json"))
-	viper.BindPFlag("data_dir", rootCmd.PersistentFlags().Lookup("data-dir"))
+	rootCmd.PersistentFlags().String("data-dir", "", "data directory (default: ~/.velox or /var/lib/velox)")
 
 	// Register subcommands
 	rootCmd.AddCommand(newParseCmd())
@@ -62,9 +57,16 @@ func initConfig(cmd *cobra.Command, args []string) error {
 	if cfgFile != "" {
 		viper.SetConfigFile(cfgFile)
 	} else {
-		homeDir, _ := os.UserHomeDir()
-		configDir := filepath.Join(homeDir, ".velox")
-		viper.AddConfigPath(configDir)
+		// Search paths for config file:
+		// 1. Current directory
+		viper.AddConfigPath(".")
+		// 2. User home: ~/.velox and ~/.config/velox
+		if homeDir, err := os.UserHomeDir(); err == nil && homeDir != "" {
+			viper.AddConfigPath(filepath.Join(homeDir, ".velox"))
+			viper.AddConfigPath(filepath.Join(homeDir, ".config", "velox"))
+		}
+		// 3. System-wide config on Linux: /etc/velox
+		viper.AddConfigPath("/etc/velox")
 		viper.SetConfigName("config")
 		viper.SetConfigType("yaml")
 	}
@@ -86,9 +88,31 @@ func initConfig(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unmarshal config: %w", err)
 	}
 
+	// Explicit CLI flags override config file and defaults
+	if cmd.Flags().Changed("data-dir") {
+		if val, err := cmd.Flags().GetString("data-dir"); err == nil && val != "" {
+			appCfg.DataDir = val
+		}
+	}
+	if cmd.Flags().Changed("log-level") {
+		if val, err := cmd.Flags().GetString("log-level"); err == nil && val != "" {
+			appCfg.LogLevel = val
+		}
+	}
+	if cmd.Flags().Changed("log-json") {
+		if val, err := cmd.Flags().GetBool("log-json"); err == nil {
+			appCfg.LogJSON = val
+		}
+	}
+
+	// Fallback to default data dir if empty
+	if appCfg.DataDir == "" {
+		appCfg.DataDir = config.DefaultDataDir()
+	}
+
 	// Ensure data directory exists
 	if err := os.MkdirAll(appCfg.DataDir, 0755); err != nil {
-		return fmt.Errorf("create data dir: %w", err)
+		return fmt.Errorf("create data dir %q: %w", appCfg.DataDir, err)
 	}
 
 	// Initialize logger

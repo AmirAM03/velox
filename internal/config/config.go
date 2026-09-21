@@ -103,13 +103,19 @@ type DebugConfig struct {
 	PprofAddr    string `mapstructure:"pprof_addr"`    // pprof listen address
 }
 
+// DefaultDataDir returns the default data directory for Velox.
+func DefaultDataDir() string {
+	homeDir, err := os.UserHomeDir()
+	if err == nil && homeDir != "" {
+		return filepath.Join(homeDir, ".velox")
+	}
+	return "/var/lib/velox"
+}
+
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() *Config {
-	homeDir, _ := os.UserHomeDir()
-	dataDir := filepath.Join(homeDir, ".velox")
-
 	return &Config{
-		DataDir:  dataDir,
+		DataDir:  DefaultDataDir(),
 		LogLevel: "info",
 		LogJSON:  false,
 		Pipeline: PipelineConfig{
