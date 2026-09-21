@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -288,12 +289,20 @@ func (p *Pipeline) testProxy(ctx context.Context, cfg *model.ProxyConfig) model.
 	}
 
 	// Test against each target URL
-	for _, targetURL := range p.targets {
+	for _, rawTarget := range p.targets {
+		targetURL := strings.TrimSpace(rawTarget)
+		if targetURL == "" {
+			continue
+		}
+		if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
+			targetURL = "https://" + targetURL
+		}
+
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 		if err != nil {
 			continue
 		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) Velox/1.0")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Velox/1.0")
 
 		ttfbStart := time.Now()
 		resp, err := client.Do(req)
@@ -303,14 +312,14 @@ func (p *Pipeline) testProxy(ctx context.Context, cfg *model.ProxyConfig) model.
 			return model.TestResult{
 				Success:   false,
 				Error:     fmt.Sprintf("http request to %s: %v", targetURL, err),
-				Latency:   time.Since(start),
+				Latency:   ttfb,
 				TTFB:      ttfb,
 				TargetURL: targetURL,
 			}
 		}
 		resp.Body.Close()
 
-		// Check status code
+		// Check status code: matching explicit expect list or any valid HTTP 2xx/3xx
 		statusOK := false
 		for _, expected := range p.expect {
 			if resp.StatusCode == expected {
@@ -318,12 +327,15 @@ func (p *Pipeline) testProxy(ctx context.Context, cfg *model.ProxyConfig) model.
 				break
 			}
 		}
+		if !statusOK && resp.StatusCode >= 200 && resp.StatusCode < 400 {
+			statusOK = true
+		}
 
 		if !statusOK {
 			return model.TestResult{
 				Success:   false,
 				Error:     fmt.Sprintf("unexpected status %d from %s", resp.StatusCode, targetURL),
-				Latency:   time.Since(start),
+				Latency:   ttfb,
 				TTFB:      ttfb,
 				TargetURL: targetURL,
 			}
@@ -332,7 +344,7 @@ func (p *Pipeline) testProxy(ctx context.Context, cfg *model.ProxyConfig) model.
 		// First successful target is enough
 		return model.TestResult{
 			Success:   true,
-			Latency:   time.Since(start),
+			Latency:   ttfb,
 			TTFB:      ttfb,
 			TargetURL: targetURL,
 		}

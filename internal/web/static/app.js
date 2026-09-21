@@ -413,8 +413,9 @@ const app = {
   },
 
   async startBenchmark() {
-    const target = document.getElementById('benchmark-target-input')?.value.trim() || 'https://www.google.com';
+    const target = document.getElementById('benchmark-target-input')?.value.trim() || 'https://www.google.com/generate_204';
     const limit = parseInt(document.getElementById('benchmark-limit-input')?.value || '50', 10);
+    const proto = document.getElementById('benchmark-proto-select')?.value || '';
 
     const box = document.getElementById('benchmark-status-box');
     const startBtn = document.getElementById('btn-start-benchmark');
@@ -422,11 +423,12 @@ const app = {
 
     if (box) {
       box.innerHTML = `
-        <div class="text-center py-4">
-          <div class="empty-icon">⚡</div>
-          <p class="font-bold">Benchmarking ${limit} configs against:</p>
-          <p class="text-mono text-sm text-cyan mb-3">${this.escapeHtml(target)}</p>
-          <p class="text-muted text-xs">Running Stage 0 (DNS+TCP) → Stage 1 (TLS) → Stage 2 (Proxy Request)...</p>
+        <div class="text-center py-5">
+          <div class="empty-icon rotating">⚡</div>
+          <p class="font-bold text-lg mb-1">Benchmarking ${limit} configs</p>
+          <p class="text-mono text-sm text-cyan mb-2">${this.escapeHtml(target)}</p>
+          <p class="text-muted text-xs">Stage 0 (DNS+TCP) → Stage 1 (TLS) → Stage 2 (Proxy In-Process Real Delay)...</p>
+          <div class="benchmark-progress-bar mt-3"><div class="benchmark-progress-inner"></div></div>
         </div>
       `;
     }
@@ -435,17 +437,82 @@ const app = {
       const res = await fetch('/api/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target: target, limit: limit })
+        body: JSON.stringify({ target: target, limit: limit, protocol: proto })
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Benchmark failed');
 
       if (box) {
+        const passRate = data.total > 0 ? Math.round((data.passed / data.total) * 100) : 0;
+        let detailsHtml = '';
+
+        if (data.details && data.details.length > 0) {
+          detailsHtml = `
+            <div class="benchmark-table-wrap mt-4">
+              <div class="benchmark-table-header">
+                <span class="font-bold text-sm">Tested Configs Real Delay (${data.details.length})</span>
+                <span class="text-muted text-xs">Sorted by fastest latency</span>
+              </div>
+              <div class="table-responsive" style="max-height: 380px; overflow-y: auto;">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Proto</th>
+                      <th>Name / Server</th>
+                      <th>Real Delay</th>
+                      <th>Status</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${data.details.map((d, i) => {
+                      let latClass = 'latency-slow';
+                      let latText = `${Math.round(d.latency_ms)} ms`;
+                      if (!d.success) {
+                        latClass = 'latency-failed';
+                        latText = 'Timeout';
+                      } else if (d.latency_ms < 500) {
+                        latClass = 'latency-fast';
+                      } else if (d.latency_ms < 1500) {
+                        latClass = 'latency-medium';
+                      }
+
+                      const protoClass = `badge-${d.protocol.toLowerCase()}`;
+                      const statusBadge = d.success 
+                        ? `<span class="badge badge-success">Passed</span>` 
+                        : `<span class="badge badge-danger" title="${this.escapeHtml(d.error || '')}">Fail (${this.escapeHtml(d.stage)})</span>`;
+
+                      const actionBtn = d.success
+                        ? `<button class="btn btn-primary btn-xs" onclick="app.connectProxy('${d.config_id}')">Connect</button>`
+                        : `<span class="text-muted text-xs">—</span>`;
+
+                      return `
+                        <tr>
+                          <td class="text-muted text-xs">${i + 1}</td>
+                          <td><span class="badge ${protoClass}">${this.escapeHtml(d.protocol.toUpperCase())}</span></td>
+                          <td>
+                            <div class="node-name-cell" title="${this.escapeHtml(d.name)}">${this.escapeHtml(d.name)}</div>
+                            <div class="text-muted text-xs">${this.escapeHtml(d.address)}:${d.port}</div>
+                          </td>
+                          <td><span class="latency-badge ${latClass}">${latText}</span></td>
+                          <td>${statusBadge}</td>
+                          <td>${actionBtn}</td>
+                        </tr>
+                      `;
+                    }).join('')}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          `;
+        }
+
         box.innerHTML = `
           <div class="result-card">
             <div class="result-header">
               <span class="font-bold text-success">✅ Benchmark Finished</span>
-              <span class="badge badge-vless">${data.passed}/${data.total} Passed</span>
+              <span class="badge badge-vless">${data.passed}/${data.total} Passed (${passRate}%)</span>
             </div>
             <div class="result-grid">
               <div class="result-metric">
@@ -457,19 +524,20 @@ const app = {
                 <div class="result-metric-val" style="color: var(--accent-emerald);">${data.passed}</div>
               </div>
               <div class="result-metric">
-                <div class="result-metric-label">Fastest Latency</div>
+                <div class="result-metric-label">Fastest Real Delay</div>
                 <div class="result-metric-val" style="color: var(--accent-cyan);">${data.fastest_ms ? Math.round(data.fastest_ms) + ' ms' : '—'}</div>
               </div>
               <div class="result-metric">
                 <div class="result-metric-label">Target URL</div>
-                <div class="result-metric-val text-xs text-muted" style="word-break: break-all;">${this.escapeHtml(target)}</div>
+                <div class="result-metric-val text-xs text-muted" style="word-break: break-all;">${this.escapeHtml(data.target || target)}</div>
               </div>
             </div>
+            ${detailsHtml}
           </div>
         `;
       }
 
-      this.showToast(`Benchmark complete! ${data.passed} working nodes scored.`, 'success');
+      this.showToast(`Benchmark complete! ${data.passed} of ${data.total} passed.`, 'success');
       this.refreshStatus();
       this.loadTopNodes();
     } catch (e) {

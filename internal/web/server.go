@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -309,22 +310,33 @@ func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Target string `json:"target"`
-		Limit  int    `json:"limit"`
+		Target   string `json:"target"`
+		Limit    int    `json:"limit"`
+		Protocol string `json:"protocol"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
+	req.Target = strings.TrimSpace(req.Target)
 	if req.Target == "" {
-		req.Target = "https://www.google.com"
+		req.Target = "https://www.google.com/generate_204"
+	}
+	if !strings.HasPrefix(req.Target, "http://") && !strings.HasPrefix(req.Target, "https://") {
+		req.Target = "https://" + req.Target
 	}
 	if req.Limit <= 0 {
 		req.Limit = 50
 	}
 
-	configs, err := s.store.ListConfigs(req.Limit)
+	var configs []*model.ProxyConfig
+	var err error
+	if req.Protocol != "" && req.Protocol != "all" {
+		configs, err = s.store.ListConfigsFiltered(strings.ToLower(req.Protocol), req.Limit)
+	} else {
+		configs, err = s.store.ListConfigs(req.Limit)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -346,31 +358,88 @@ func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
 	passed := 0
 	var fastestMS float64
 
+	type TestDetail struct {
+		ConfigID  string  `json:"config_id"`
+		Name      string  `json:"name"`
+		Protocol  string  `json:"protocol"`
+		Address   string  `json:"address"`
+		Port      int     `json:"port"`
+		Success   bool    `json:"success"`
+		LatencyMS float64 `json:"latency_ms"`
+		Stage     string  `json:"stage"`
+		Error     string  `json:"error,omitempty"`
+	}
+
+	var details []TestDetail
+
 	for _, r := range results {
+		var nodeLatency float64
+		var lastErr string
+		var lastStage = "passed"
+
 		if !r.Failed {
 			passed++
 			for _, tr := range r.Results {
 				if tr.Success && tr.Stage == model.StageProxy {
 					latMS := float64(tr.Latency.Milliseconds())
+					nodeLatency = latMS
 					if fastestMS == 0 || (latMS > 0 && latMS < fastestMS) {
 						fastestMS = latMS
 					}
 				}
 			}
+		} else {
+			lastStage = r.FailedStage.String()
+			for _, tr := range r.Results {
+				if !tr.Success {
+					lastErr = tr.Error
+				}
+			}
 		}
+
 		if err := s.store.InsertTestResults(r.Results); err != nil {
 			s.logger.Warn("failed to store test results", "error", err)
 		}
 		existing, _ := s.store.GetScore(r.Config.ID)
 		score := sc.Compute(r.Config.ID, r.Results, existing)
-		s.store.UpsertScore(score)
+		_ = s.store.UpsertScore(score)
+
+		name := r.Config.DisplayName()
+		if name == "" {
+			name = r.Config.Address
+		}
+
+		details = append(details, TestDetail{
+			ConfigID:  r.Config.ID,
+			Name:      name,
+			Protocol:  string(r.Config.Protocol),
+			Address:   r.Config.Address,
+			Port:      r.Config.Port,
+			Success:   !r.Failed,
+			LatencyMS: nodeLatency,
+			Stage:     lastStage,
+			Error:     lastErr,
+		})
 	}
+
+	// Sort details: working nodes first by latency ascending, then failures
+	sort.Slice(details, func(i, j int) bool {
+		if details[i].Success != details[j].Success {
+			return details[i].Success
+		}
+		if details[i].Success && details[j].Success {
+			return details[i].LatencyMS < details[j].LatencyMS
+		}
+		return false
+	})
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"total":      len(configs),
 		"passed":     passed,
+		"failed":     len(configs) - passed,
 		"fastest_ms": fastestMS,
 		"target":     req.Target,
+		"details":    details,
 	})
 }
 

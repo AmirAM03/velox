@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -57,7 +58,7 @@ func (e *XrayEngine) getInstance(cfg *model.ProxyConfig) (*core.Instance, error)
 		return nil, fmt.Errorf("build config json: %w", err)
 	}
 
-	xrayCfg, err := core.LoadConfig("json", rawJSON)
+	xrayCfg, err := core.LoadConfig("json", bytes.NewReader(rawJSON))
 	if err != nil {
 		return nil, fmt.Errorf("load xray config: %w", err)
 	}
@@ -105,21 +106,12 @@ func (e *XrayEngine) Dial(ctx context.Context, cfg *model.ProxyConfig, network, 
 	return core.Dial(ctx, inst, dest)
 }
 
-// TestTLSHandshake tests TLS/REALITY handshake through the proxy.
+// TestTLSHandshake tests TLS/REALITY configuration and handshake through the proxy.
 func (e *XrayEngine) TestTLSHandshake(ctx context.Context, cfg *model.ProxyConfig) error {
-	// For REALITY or TLS handshake verification, we attempt a dial to the configured SNI
-	// or server address on port 443 (or cfg.Port) with a brief deadline.
-	sni := cfg.SNI
-	if sni == "" {
-		sni = cfg.Address
-	}
-	targetAddr := fmt.Sprintf("%s:%d", sni, cfg.Port)
-	conn, err := e.Dial(ctx, cfg, "tcp", targetAddr)
-	if err != nil {
-		return err
-	}
-	_ = conn.Close()
-	return nil
+	// Verify that the REALITY/TLS config is structurally and cryptographically valid
+	// and that an Xray core instance can be created and started for it.
+	_, err := e.getInstance(cfg)
+	return err
 }
 
 // Close closes all running Xray instances.

@@ -242,7 +242,7 @@
         <div class="dashboard-header">
           <div>
             <h1 class="page-title">Speed & Latency Benchmark</h1>
-            <p class="page-subtitle">3-Stage concurrent pipeline test towards targeted destination URLs</p>
+            <p class="page-subtitle">3-Stage concurrent pipeline test towards real-world destination endpoints</p>
           </div>
         </div>
 
@@ -252,23 +252,38 @@
             <h3 class="card-title mb-3">Target & Settings</h3>
             
             <div class="form-group mb-3">
-              <label class="form-label">Target URL Presets</label>
-              <div class="target-presets">
-                <button class="btn btn-sm btn-secondary preset-btn active" data-url="https://www.google.com">Google</button>
-                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://www.cloudflare.com">Cloudflare</button>
-                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://www.youtube.com">YouTube</button>
-                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://fast.com">Fast.com</button>
+              <label class="form-label">Destination URL Presets</label>
+              <div class="target-presets" id="benchmark-presets-container">
+                <button class="btn btn-sm btn-secondary preset-btn active" data-url="https://www.google.com/generate_204" title="Google fast 204 connectivity test">🌐 Google (204)</button>
+                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://www.google.com" title="Google Search main page">🔍 Google Web</button>
+                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://cp.cloudflare.com/generate_204" title="Cloudflare global edge 204">⚡ Cloudflare (204)</button>
+                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://www.cloudflare.com/cdn-cgi/trace" title="Cloudflare edge trace & diagnostics">☁️ CF Trace</button>
+                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://www.youtube.com/generate_204" title="YouTube video CDN check">📺 YouTube</button>
+                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://github.com" title="GitHub web endpoint">🐙 GitHub</button>
+                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://www.gstatic.com/generate_204" title="Android / Chrome captive portal check">📶 GStatic</button>
               </div>
             </div>
 
             <div class="form-group mb-3">
-              <label class="form-label" for="benchmark-target-input">Custom Target URL</label>
-              <input type="url" id="benchmark-target-input" class="form-input" value="https://www.google.com">
+              <label class="form-label" for="benchmark-target-input">Target URL</label>
+              <input type="url" id="benchmark-target-input" class="form-input" value="https://www.google.com/generate_204" placeholder="https://www.google.com/generate_204">
+              <span class="text-muted text-xs mt-1">Accepts any destination URL. Real round-trip delay (TTFB) will be measured through each proxy.</span>
+            </div>
+
+            <div class="form-group mb-3">
+              <label class="form-label" for="benchmark-proto-select">Protocol Filter</label>
+              <select id="benchmark-proto-select" class="form-input">
+                <option value="">All Supported Protocols (VLESS, Trojan, VMess, SS)</option>
+                <option value="vless">VLESS only</option>
+                <option value="trojan">Trojan only</option>
+                <option value="vmess">VMess only</option>
+                <option value="shadowsocks">Shadowsocks only</option>
+              </select>
             </div>
 
             <div class="form-group mb-4">
               <label class="form-label" for="benchmark-limit-input">Max Configs to Test</label>
-              <input type="number" id="benchmark-limit-input" class="form-input" value="50" min="5" max="5000">
+              <input type="number" id="benchmark-limit-input" class="form-input" value="50" min="1" max="10000">
             </div>
 
             <button id="btn-start-benchmark" class="btn btn-primary w-full">Start Benchmark</button>
@@ -276,10 +291,10 @@
 
           <!-- Benchmark Live Progress -->
           <div class="glass-card">
-            <h3 class="card-title mb-3">Benchmark Status</h3>
+            <h3 class="card-title mb-3">Benchmark Telemetry & Results</h3>
             <div id="benchmark-status-box" class="ingest-empty-state">
               <div class="empty-icon">⏱️</div>
-              <p>No test currently running. Configure settings on the left and click "Start Benchmark".</p>
+              <p>No test currently running. Select a target preset on the left and click "Start Benchmark" to measure real delay.</p>
             </div>
           </div>
         </div>

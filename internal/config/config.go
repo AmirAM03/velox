@@ -142,7 +142,11 @@ func DefaultConfig() *Config {
 			FailThreshold:  2,
 		},
 		Targets: TargetConfig{
-			URLs:         []string{"https://www.gstatic.com/generate_204"},
+			URLs: []string{
+				"https://www.google.com/generate_204",
+				"https://cp.cloudflare.com/generate_204",
+				"https://www.gstatic.com/generate_204",
+			},
 			ExpectStatus: []int{200, 204},
 			SpeedTestURL: "https://speed.cloudflare.com/__down?bytes=10485760",
 			DNSTestHost:  "google.com",

@@ -43,8 +43,9 @@ proxy:
 targets:
   # URLs to probe in Stage 2 (first success marks config functional)
   urls:
-    - "https://www.gstatic.com/generate_204"
+    - "https://www.google.com/generate_204"
     - "https://cp.cloudflare.com/generate_204"
+    - "https://www.gstatic.com/generate_204"
   expect_status:
     - 200
     - 204
