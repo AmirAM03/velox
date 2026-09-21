@@ -8,7 +8,6 @@ REPO="AmirAM03/velox"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/velox"
 DATA_DIR="/var/lib/velox"
-SERVICE_FILE="/etc/systemd/system/velox.service"
 
 # Colors for output
 RED='\033[0;31m'
@@ -102,32 +101,20 @@ else
     info "Existing configuration at $CONFIG_DIR/config.yaml preserved"
 fi
 
-# Install systemd service if systemd is active
-if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-    if [ -f "$TMP_DIR/velox.service" ]; then
-        cp "$TMP_DIR/velox.service" "$SERVICE_FILE"
-    else
-        curl -fsSL -o "$SERVICE_FILE" "https://raw.githubusercontent.com/$REPO/main/velox.service" || true
-    fi
-    chmod 644 "$SERVICE_FILE"
-    systemctl daemon-reload
-    success "Installed systemd service at $SERVICE_FILE"
-fi
-
 echo -e "\n${GREEN}════════════════════════════════════════════════════════════${NC}"
 echo -e "${GREEN}       Velox ${LATEST_TAG} installed successfully!${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}\n"
 
 echo -e "Quick Usage Guide:\n"
-echo -e "  1. Ingest subscription configs:"
+echo -e "  1. Launch interactive Web Dashboard (Recommended):"
+echo -e "     ${CYAN}velox ui${NC}  (or ${CYAN}velox --dashboard${NC})\n"
+echo -e "  2. Ingest subscription configs via CLI:"
 echo -e "     ${CYAN}velox parse --sub \"https://your-subscription-url\"${NC}\n"
-echo -e "  2. Test configs against custom targets:"
+echo -e "  3. Test configs against custom targets:"
 echo -e "     ${CYAN}velox test --target \"https://www.google.com\"${NC}\n"
-echo -e "  3. List top-ranked configs:"
+echo -e "  4. List top-ranked configs:"
 echo -e "     ${CYAN}velox list${NC}\n"
-echo -e "  4. Start local proxy in foreground:"
+echo -e "  5. Start local proxy in foreground:"
 echo -e "     ${CYAN}velox connect --system${NC}\n"
-echo -e "  5. Or run continuously as background systemd service:"
-echo -e "     ${CYAN}sudo systemctl enable --now velox${NC}"
-echo -e "     ${CYAN}sudo systemctl status velox${NC}\n"
-echo -e "Proxy listen address: ${GREEN}127.0.0.1:1080${NC} (Mixed SOCKS5 / HTTP)\n"
+echo -e "Proxy listen address: ${GREEN}127.0.0.1:1080${NC} (Mixed SOCKS5 / HTTP)"
+echo -e "Web Dashboard URL:    ${GREEN}http://127.0.0.1:18080${NC}\n"

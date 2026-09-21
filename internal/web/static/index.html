@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Velox — High-Performance V2Ray Proxy Engine</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/index.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Navbar -->
+    <header class="navbar">
+      <div class="nav-brand">
+        <div class="brand-logo">⚡</div>
+        <div class="brand-text">
+          <span class="brand-title">VELOX</span>
+          <span class="brand-badge">v0.1.4</span>
+        </div>
+      </div>
+
+      <nav class="nav-links">
+        <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
+        <button class="nav-btn" data-tab="configs">Configs</button>
+        <button class="nav-btn" data-tab="ingest">Ingest & Parse</button>
+        <button class="nav-btn" data-tab="benchmark">Benchmark</button>
+        <button class="nav-btn" data-tab="tools">Database Tools</button>
+      </nav>
+
+      <div class="nav-status-group">
+        <div id="proxy-status-pill" class="status-pill idle">
+          <span class="status-dot"></span>
+          <span id="proxy-status-text">Proxy: Disconnected</span>
+        </div>
+        <button id="quick-toggle-btn" class="btn btn-primary btn-sm">Connect Best</button>
+      </div>
+    </header>
+
+    <!-- Notification Banner -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+
+      <!-- 1. DASHBOARD VIEW -->
+      <section id="tab-dashboard" class="tab-pane active">
+        <div class="dashboard-header">
+          <div>
+            <h1 class="page-title">System Overview</h1>
+            <p class="page-subtitle">Real-time telemetry, proxy status, and node statistics</p>
+          </div>
+          <div class="actions-group">
+            <button id="btn-refresh-all" class="btn btn-secondary">
+              <span class="icon">↻</span> Refresh
+            </button>
+          </div>
+        </div>
+
+        <!-- Metrics Cards Grid -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon-wrap cyan">📦</div>
+            <div class="stat-data">
+              <span class="stat-label">Stored Configurations</span>
+              <span id="stat-total-configs" class="stat-value">0</span>
+              <span class="stat-tag success">100% Deduplicated</span>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon-wrap emerald">⚡</div>
+            <div class="stat-data">
+              <span class="stat-label">Active Proxy</span>
+              <span id="stat-active-node" class="stat-value text-sm">None</span>
+              <span id="stat-active-port" class="stat-tag">Endpoint: 127.0.0.1:1080</span>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon-wrap purple">📊</div>
+            <div class="stat-data">
+              <span class="stat-label">Benchmark Status</span>
+              <span id="stat-tested-count" class="stat-value">0 Tested</span>
+              <span id="stat-avg-latency" class="stat-tag">Avg: — ms</span>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon-wrap amber">🛡️</div>
+            <div class="stat-data">
+              <span class="stat-label">System Proxy</span>
+              <span id="stat-sys-proxy" class="stat-value text-sm">Disabled</span>
+              <label class="toggle-switch">
+                <input type="checkbox" id="toggle-sys-proxy">
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Protocols Breakdown Banner -->
+        <div class="glass-card mb-4">
+          <div class="card-header">
+            <h3 class="card-title">Protocol Distribution</h3>
+            <span id="proto-total-badge" class="badge">0 total</span>
+          </div>
+          <div id="protocol-bars" class="proto-bar-container"></div>
+          <div id="protocol-badges" class="proto-chips-container"></div>
+        </div>
+
+        <!-- Top Ranked Nodes Table -->
+        <div class="glass-card">
+          <div class="card-header">
+            <h3 class="card-title">Top Ranked Nodes</h3>
+            <button class="btn btn-secondary btn-sm" onclick="app.switchTab('configs')">View All →</button>
+          </div>
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Proto</th>
+                  <th>Name</th>
+                  <th>Server</th>
+                  <th>Score</th>
+                  <th>Latency</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="top-nodes-tbody">
+                <tr><td colspan="7" class="text-muted text-center py-4">Loading top nodes...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. CONFIGS EXPLORER VIEW -->
+      <section id="tab-configs" class="tab-pane">
+        <div class="dashboard-header">
+          <div>
+            <h1 class="page-title">Configuration Explorer</h1>
+            <p class="page-subtitle">Search, filter, and inspect all stored proxy configurations</p>
+          </div>
+        </div>
+
+        <!-- Filters Bar -->
+        <div class="glass-card filter-bar mb-4">
+          <div class="filter-controls">
+            <div class="protocol-filter-pills" id="configs-proto-filters">
+              <button class="filter-pill active" data-proto="">All</button>
+              <button class="filter-pill" data-proto="vless">VLESS</button>
+              <button class="filter-pill" data-proto="hysteria2">Hysteria 2</button>
+              <button class="filter-pill" data-proto="trojan">Trojan</button>
+              <button class="filter-pill" data-proto="shadowsocks">Shadowsocks</button>
+              <button class="filter-pill" data-proto="vmess">VMess</button>
+            </div>
+
+            <div class="search-wrap">
+              <input type="text" id="configs-search-input" placeholder="Search by name, address, or port..." class="input-search">
+            </div>
+          </div>
+        </div>
+
+        <!-- All Configs Table -->
+        <div class="glass-card">
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Rank</th>
+                  <th>Protocol</th>
+                  <th>Remark / Name</th>
+                  <th>Address & Port</th>
+                  <th>Transport / TLS</th>
+                  <th>Score</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="all-configs-tbody">
+                <tr><td colspan="7" class="text-muted text-center py-4">Loading configurations...</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pagination-bar">
+            <span id="configs-count-info" class="text-muted text-sm">Showing 0 configs</span>
+            <div class="pagination-buttons">
+              <button id="btn-prev-page" class="btn btn-secondary btn-sm" disabled>Previous</button>
+              <button id="btn-next-page" class="btn btn-secondary btn-sm" disabled>Next</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. INGEST & PARSE VIEW -->
+      <section id="tab-ingest" class="tab-pane">
+        <div class="dashboard-header">
+          <div>
+            <h1 class="page-title">Ingest & Parse</h1>
+            <p class="page-subtitle">Import subscriptions or paste proxy configurations with automatic deduplication</p>
+          </div>
+        </div>
+
+        <div class="two-col-grid">
+          <!-- Left Column: Inputs -->
+          <div class="glass-card">
+            <h3 class="card-title mb-3">Subscription URL Ingestion</h3>
+            <div class="form-group mb-4">
+              <label class="form-label" for="sub-url-input">Subscription URL</label>
+              <div class="input-group">
+                <input type="url" id="sub-url-input" class="form-input" placeholder="https://example.com/subscription.txt">
+                <button id="btn-fetch-sub" class="btn btn-primary">Fetch & Ingest</button>
+              </div>
+              <span class="text-muted text-xs mt-1">Supports base64 subscriptions, raw URI lists, and GitHub raw URLs.</span>
+            </div>
+
+            <hr class="divider">
+
+            <h3 class="card-title mb-3">Manual Paste</h3>
+            <div class="form-group mb-3">
+              <label class="form-label" for="paste-input">Paste Config URIs (one per line)</label>
+              <textarea id="paste-input" class="form-textarea" rows="8" placeholder="vless://...&#10;hysteria2://...&#10;trojan://...&#10;ss://...&#10;vmess://..."></textarea>
+            </div>
+            <button id="btn-parse-paste" class="btn btn-primary w-full">Parse & Deduplicate Into Database</button>
+          </div>
+
+          <!-- Right Column: Live Results -->
+          <div class="glass-card">
+            <h3 class="card-title mb-3">Ingestion Telemetry</h3>
+            <div id="ingest-results-box" class="ingest-empty-state">
+              <div class="empty-icon">📥</div>
+              <p>Ready to ingest. Enter a subscription URL or paste configs on the left to view parsing & deduplication telemetry.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4. BENCHMARK VIEW -->
+      <section id="tab-benchmark" class="tab-pane">
+        <div class="dashboard-header">
+          <div>
+            <h1 class="page-title">Speed & Latency Benchmark</h1>
+            <p class="page-subtitle">3-Stage concurrent pipeline test towards targeted destination URLs</p>
+          </div>
+        </div>
+
+        <div class="two-col-grid">
+          <!-- Benchmark Configuration -->
+          <div class="glass-card">
+            <h3 class="card-title mb-3">Target & Settings</h3>
+            
+            <div class="form-group mb-3">
+              <label class="form-label">Target URL Presets</label>
+              <div class="target-presets">
+                <button class="btn btn-sm btn-secondary preset-btn active" data-url="https://www.google.com">Google</button>
+                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://www.cloudflare.com">Cloudflare</button>
+                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://www.youtube.com">YouTube</button>
+                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://fast.com">Fast.com</button>
+              </div>
+            </div>
+
+            <div class="form-group mb-3">
+              <label class="form-label" for="benchmark-target-input">Custom Target URL</label>
+              <input type="url" id="benchmark-target-input" class="form-input" value="https://www.google.com">
+            </div>
+
+            <div class="form-group mb-4">
+              <label class="form-label" for="benchmark-limit-input">Max Configs to Test</label>
+              <input type="number" id="benchmark-limit-input" class="form-input" value="50" min="5" max="5000">
+            </div>
+
+            <button id="btn-start-benchmark" class="btn btn-primary w-full">Start Benchmark</button>
+          </div>
+
+          <!-- Benchmark Live Progress -->
+          <div class="glass-card">
+            <h3 class="card-title mb-3">Benchmark Status</h3>
+            <div id="benchmark-status-box" class="ingest-empty-state">
+              <div class="empty-icon">⏱️</div>
+              <p>No test currently running. Configure settings on the left and click "Start Benchmark".</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 5. DATABASE TOOLS VIEW -->
+      <section id="tab-tools" class="tab-pane">
+        <div class="dashboard-header">
+          <div>
+            <h1 class="page-title">Database & Maintenance</h1>
+            <p class="page-subtitle">Inspect storage health, remove redundant duplicates, and optimize performance</p>
+          </div>
+        </div>
+
+        <div class="stats-grid mb-4">
+          <div class="glass-card">
+            <h3 class="card-title mb-2">Zero-Duplication Enforcer</h3>
+            <p class="text-muted text-sm mb-4">
+              Re-scans every entry in the database against the canonical SHA-256 identity hash and cleans up any redundant records.
+            </p>
+            <button id="btn-run-dedup" class="btn btn-primary">Run Database Deduplication</button>
+          </div>
+
+          <div class="glass-card">
+            <h3 class="card-title mb-2">Database Information</h3>
+            <div class="info-list text-sm">
+              <div class="info-row">
+                <span class="text-muted">Storage Engine:</span>
+                <span class="text-mono">SQLite WAL Mode</span>
+              </div>
+              <div class="info-row">
+                <span class="text-muted">Database Path:</span>
+                <span id="db-path-display" class="text-mono text-xs">Loading...</span>
+              </div>
+              <div class="info-row">
+                <span class="text-muted">Active Proxy Port:</span>
+                <span class="text-mono">127.0.0.1:1080</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

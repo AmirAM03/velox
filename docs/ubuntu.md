@@ -18,7 +18,6 @@ This automated installer:
 3. Installs the executable to `/usr/local/bin/velox`.
 4. Creates the configuration template at `/etc/velox/config.yaml`.
 5. Creates the data directory `/var/lib/velox`.
-6. Configures the `velox.service` systemd unit.
 
 ---
 
@@ -68,13 +67,31 @@ velox list --show-uri
 
 ---
 
-## 3. Running the Proxy
+## 3. Running Velox
 
-Velox provides a **mixed inbound port** (`127.0.0.1:1080` by default) supporting both **SOCKS5** and **HTTP / HTTPS CONNECT** protocols simultaneously on the same port.
+### Option A: Interactive Web Dashboard (Recommended)
+Launch the built-in, zero-dependency modern Web Dashboard in your browser:
 
-### Option A: Run in Foreground (Terminal / Tmux)
 ```bash
-# Start proxy with auto-failover
+velox ui
+# or:
+velox dashboard
+# or with flags:
+velox --ui --port 18080
+```
+
+The Web Dashboard lets you:
+- Explore and search all parsed configurations with real-time protocol badges and latency tags.
+- Ingest subscription URLs or raw configuration blocks with instant deduplication.
+- Trigger multi-stage speed benchmarks and latency tests against custom endpoints.
+- Connect or disconnect the in-process proxy engine with a single click.
+- Toggle system proxy routing directly from the interface.
+
+### Option B: Run Proxy in CLI Foreground
+Velox provides a **mixed inbound port** (`127.0.0.1:1080` by default) supporting both **SOCKS5** and **HTTP / HTTPS CONNECT** protocols simultaneously on the same port:
+
+```bash
+# Start proxy with auto-failover in foreground
 velox connect
 
 # Start proxy and automatically configure Ubuntu desktop system proxy (GNOME)
@@ -82,24 +99,6 @@ velox connect --system
 
 # Specify custom port
 velox connect --port 2080
-```
-
-### Option B: Run as a Background Systemd Service
-On headless servers or dedicated proxy hosts:
-
-```bash
-# Enable and start the service
-sudo systemctl enable --now velox
-
-# Check service status and active node logs
-sudo systemctl status velox
-
-# View live logs
-sudo journalctl -u velox -f
-
-# Restart or stop
-sudo systemctl restart velox
-sudo systemctl stop velox
 ```
 
 ---
@@ -145,8 +144,6 @@ ulimit -n
 # Increase file descriptors temporarily
 ulimit -n 65535
 ```
-
-The installed `velox.service` already includes `LimitNOFILE=65535` out-of-the-box.
 
 ---
 

@@ -46,6 +46,8 @@ jobs:
             "linux/amd64/velox"
             "linux/arm64/velox"
             "windows/amd64/velox.exe"
+            "windows/arm64/velox.exe"
+            "darwin/amd64/velox"
             "darwin/arm64/velox"
           )
 
@@ -59,15 +61,14 @@ jobs:
 
             cp config.example.yaml "$OUTPUT_DIR/"
             if [ "$OS" = "linux" ]; then
-              cp velox.service install.sh "$OUTPUT_DIR/"
+              cp install.sh "$OUTPUT_DIR/"
             fi
 
-            ARCHIVE="dist/velox-${TAG}-${OS}-${ARCH}.tar.gz"
+            ARCHIVE_NAME="velox-${TAG}-${OS}-${ARCH}"
             if [ "$OS" = "windows" ]; then
-              ARCHIVE="dist/velox-${TAG}-${OS}-${ARCH}.zip"
-              (cd "$OUTPUT_DIR" && zip -r "../../$ARCHIVE" .)
+              (cd "$OUTPUT_DIR" && zip -r "$GITHUB_WORKSPACE/dist/${ARCHIVE_NAME}.zip" .)
             else
-              tar -czf "$ARCHIVE" -C "$OUTPUT_DIR" .
+              tar -czf "$GITHUB_WORKSPACE/dist/${ARCHIVE_NAME}.tar.gz" -C "$OUTPUT_DIR" .
             fi
           done
 

@@ -33,6 +33,17 @@ your custom target URLs, and connect through the fastest working proxy.`,
 		SilenceUsage:      true,
 	}
 
+	var runDashboard bool
+	rootCmd.Flags().BoolVar(&runDashboard, "ui", false, "launch the interactive Web Dashboard")
+	rootCmd.Flags().BoolVar(&runDashboard, "dashboard", false, "launch the interactive Web Dashboard")
+
+	rootCmd.RunE = func(cmd *cobra.Command, args []string) error {
+		if runDashboard {
+			return runUI(cmd.Context(), 18080, true)
+		}
+		return cmd.Help()
+	}
+
 	// Persistent flags (available to all subcommands)
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ~/.velox/config.yaml or /etc/velox/config.yaml)")
 	rootCmd.PersistentFlags().String("log-level", "info", "log level (debug, info, warn, error)")
@@ -45,6 +56,7 @@ your custom target URLs, and connect through the fastest working proxy.`,
 	rootCmd.AddCommand(newListCmd())
 	rootCmd.AddCommand(newConnectCmd())
 	rootCmd.AddCommand(newDedupCmd())
+	rootCmd.AddCommand(newUICmd())
 
 	return rootCmd
 }
