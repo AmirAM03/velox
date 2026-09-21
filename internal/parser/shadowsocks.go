@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"encoding/base64"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -12,9 +11,9 @@ import (
 )
 
 // ssParser handles ss:// (Shadowsocks) URIs.
-// Supports both SIP002 format and legacy format:
-//   SIP002:  ss://base64(method:password)@host:port#fragment
-//   SIP002:  ss://base64(method:password)@host:port?plugin=...#fragment
+// Supports:
+//   SIP002:  ss://base64(method:password)@host:port?params#fragment
+//   Plain:   ss://method:password@host:port?params#fragment
 //   Legacy:  ss://base64(method:password@host:port)#fragment
 type ssParser struct{}
 
@@ -25,161 +24,172 @@ func init() {
 func (p *ssParser) Scheme() string { return "ss" }
 
 func (p *ssParser) Parse(uri string) (*model.ProxyConfig, error) {
-	// Strip scheme
-	body := strings.TrimPrefix(uri, "ss://")
-
-	// Extract fragment (remark)
-	name := ""
-	if idx := strings.LastIndex(body, "#"); idx != -1 {
-		name, _ = url.PathUnescape(body[idx+1:])
-		body = body[:idx]
+	// First check if this is SIP002 / has userinfo and host
+	parsed, err := SplitProxyURI(uri)
+	if err == nil && parsed.Host != "" && parsed.Port > 0 {
+		return p.parseSIP002(parsed, uri)
 	}
 
-	var method, password, host string
-	var port int
-	var pluginOpts map[string]string
+	// Otherwise, handle legacy format or fallback
+	return p.parseLegacy(uri)
+}
 
-	// Try SIP002 format first: base64(method:password)@host:port
-	if atIdx := strings.LastIndex(body, "@"); atIdx != -1 {
-		userInfo := body[:atIdx]
-		serverPart := body[atIdx+1:]
+func (p *ssParser) parseSIP002(parsed *ParsedProxyURI, rawURI string) (*model.ProxyConfig, error) {
+	userInfo := parsed.UserInfo
+	if unescaped, err := url.QueryUnescape(userInfo); err == nil {
+		userInfo = unescaped
+	}
 
-		// Decode userinfo
-		decoded, err := base64Decode(userInfo)
-		if err != nil {
-			// Maybe userinfo is not encoded (plain method:password)
-			decoded = []byte(userInfo)
-		}
+	var method, password string
 
+	// 1. Try decoding userinfo as base64
+	decoded, err := base64Decode(userInfo)
+	if err == nil && strings.Contains(string(decoded), ":") {
 		parts := strings.SplitN(string(decoded), ":", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid userinfo format: expected method:password")
-		}
 		method = parts[0]
 		password = parts[1]
-
-		// Parse server part, might have query params
-		serverURI := "ss://" + "x@" + serverPart // Re-wrap for url.Parse
-		u, err := url.Parse(serverURI)
-		if err != nil {
-			return nil, fmt.Errorf("parse server: %w", err)
+	} else if strings.Contains(userInfo, ":") {
+		// Plain method:password
+		parts := strings.SplitN(userInfo, ":", 2)
+		method = parts[0]
+		password = parts[1]
+	} else if userInfo != "" {
+		// Single token: check query for method/encryption
+		enc := parsed.Query.Get("encryption")
+		if enc == "" {
+			enc = parsed.Query.Get("method")
 		}
-
-		host = u.Hostname()
-		portStr := u.Port()
-		if portStr == "" {
-			return nil, fmt.Errorf("missing port")
+		if enc == "" {
+			enc = "none"
 		}
-		port, err = strconv.Atoi(portStr)
-		if err != nil || port <= 0 || port > 65535 {
-			return nil, fmt.Errorf("invalid port: %q", portStr)
-		}
-
-		// Parse plugin options from query
-		if plugin := u.Query().Get("plugin"); plugin != "" {
-			pluginOpts = parseSSPlugin(plugin)
-		}
+		method = enc
+		password = userInfo
 	} else {
-		// Legacy format: base64(method:password@host:port)
-		decoded, err := base64Decode(body)
-		if err != nil {
-			return nil, fmt.Errorf("legacy base64 decode: %w", err)
-		}
-
-		// Parse as method:password@host:port
-		atIdx := strings.LastIndex(string(decoded), "@")
-		if atIdx == -1 {
-			return nil, fmt.Errorf("invalid legacy format: no @ separator")
-		}
-
-		userPart := string(decoded[:atIdx])
-		serverPart := string(decoded[atIdx+1:])
-
-		parts := strings.SplitN(userPart, ":", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid legacy userinfo: expected method:password")
-		}
-		method = parts[0]
-		password = parts[1]
-
-		// Parse host:port
-		colonIdx := strings.LastIndex(serverPart, ":")
-		if colonIdx == -1 {
-			return nil, fmt.Errorf("invalid legacy server: no port")
-		}
-		host = serverPart[:colonIdx]
-		var parseErr error
-		port, parseErr = strconv.Atoi(serverPart[colonIdx+1:])
-		if parseErr != nil || port <= 0 || port > 65535 {
-			return nil, fmt.Errorf("invalid port in legacy format")
-		}
+		return nil, fmt.Errorf("missing userinfo in shadowsocks URI")
 	}
 
-	if host == "" {
-		return nil, fmt.Errorf("missing server address")
-	}
-
-	// Build transport opts from plugin
+	// Transport options and plugins
 	opts := make(map[string]string)
 	network := model.NetworkTCP
-	if pluginOpts != nil {
-		for k, v := range pluginOpts {
+	q := parsed.Query
+
+	if plugin := q.Get("plugin"); plugin != "" {
+		for k, v := range parseSSPlugin(plugin) {
 			opts[k] = v
 		}
-		// Detect obfs/v2ray plugin transport
-		if plugin, ok := opts["plugin"]; ok {
-			switch {
-			case strings.Contains(plugin, "v2ray-plugin"):
-				if mode, ok := opts["mode"]; ok && mode == "websocket" {
-					network = model.NetworkWS
-				}
+	}
+	if t := q.Get("type"); t != "" {
+		network = mapNetwork(t)
+	}
+	if h := q.Get("host"); h != "" {
+		opts["host"] = h
+	}
+	if path := q.Get("path"); path != "" {
+		opts["path"] = path
+	}
+
+	// Detect v2ray-plugin websocket
+	if plugin, ok := opts["plugin"]; ok {
+		if strings.Contains(plugin, "v2ray-plugin") {
+			if mode, ok := opts["mode"]; ok && mode == "websocket" {
+				network = model.NetworkWS
 			}
 		}
 	}
 
+	security := model.SecurityNone
+	if strings.EqualFold(q.Get("security"), "tls") {
+		security = model.SecurityTLS
+	}
+
 	now := time.Now()
-	config := &model.ProxyConfig{
-		Name:          name,
+	return &model.ProxyConfig{
+		Name:          parsed.Fragment,
 		Protocol:      model.ProtocolShadowsocks,
-		Address:       host,
-		Port:          port,
+		Address:       parsed.Host,
+		Port:          parsed.Port,
 		Password:      password,
 		Encryption:    method,
 		Network:       network,
 		TransportOpts: opts,
-		Security:      model.SecurityNone,
+		Security:      security,
+		SNI:           q.Get("sni"),
 		CreatedAt:     now,
 		UpdatedAt:     now,
-	}
-
-	return config, nil
+	}, nil
 }
 
-// base64Decode for SS: tries all variants.
-func base64DecodeSS(s string) ([]byte, error) {
-	// Pad if necessary
-	padded := s
-	if m := len(s) % 4; m != 0 {
-		padded += strings.Repeat("=", 4-m)
+func (p *ssParser) parseLegacy(uri string) (*model.ProxyConfig, error) {
+	body := strings.TrimPrefix(uri, "ss://")
+	name := ""
+	if idx := strings.LastIndex(body, "#"); idx != -1 {
+		name = body[idx+1:]
+		body = body[:idx]
+		if unescaped, err := url.QueryUnescape(name); err == nil {
+			name = unescaped
+		}
 	}
 
-	if decoded, err := base64.StdEncoding.DecodeString(padded); err == nil {
-		return decoded, nil
+	decoded, err := base64Decode(body)
+	if err != nil {
+		return nil, fmt.Errorf("legacy base64 decode: %w", err)
 	}
-	if decoded, err := base64.URLEncoding.DecodeString(padded); err == nil {
-		return decoded, nil
+
+	decodedStr := strings.TrimSpace(string(decoded))
+
+	// Check if this is a mislabeled VMess JSON
+	if strings.HasPrefix(decodedStr, "{") && strings.Contains(decodedStr, `"add"`) {
+		vmessP := &vmessParser{}
+		cfg, err := vmessP.Parse("vmess://" + body)
+		if err == nil {
+			if cfg.Name == "" && name != "" {
+				cfg.Name = name
+			}
+			return cfg, nil
+		}
 	}
-	if decoded, err := base64.RawStdEncoding.DecodeString(s); err == nil {
-		return decoded, nil
+
+	atIdx := strings.LastIndex(decodedStr, "@")
+	if atIdx == -1 {
+		return nil, fmt.Errorf("invalid legacy format: no @ separator")
 	}
-	if decoded, err := base64.RawURLEncoding.DecodeString(s); err == nil {
-		return decoded, nil
+
+	userPart := decodedStr[:atIdx]
+	serverPart := decodedStr[atIdx+1:]
+
+	parts := strings.SplitN(userPart, ":", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid legacy userinfo: expected method:password")
 	}
-	return nil, fmt.Errorf("base64 decode failed")
+	method := parts[0]
+	password := parts[1]
+
+	colonIdx := strings.LastIndex(serverPart, ":")
+	if colonIdx == -1 {
+		return nil, fmt.Errorf("invalid legacy server: no port")
+	}
+	host := serverPart[:colonIdx]
+	port, err := strconv.Atoi(serverPart[colonIdx+1:])
+	if err != nil || port <= 0 || port > 65535 {
+		return nil, fmt.Errorf("invalid port in legacy format: %s", serverPart[colonIdx+1:])
+	}
+
+	now := time.Now()
+	return &model.ProxyConfig{
+		Name:       name,
+		Protocol:   model.ProtocolShadowsocks,
+		Address:    host,
+		Port:       port,
+		Password:   password,
+		Encryption: method,
+		Network:    model.NetworkTCP,
+		Security:   model.SecurityNone,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}, nil
 }
 
-// parseSSPlugin parses Shadowsocks plugin option string.
-// Format: "plugin_name;opt1=val1;opt2=val2"
+// parseSSPlugin parses Shadowsocks plugin option string: "plugin_name;opt1=val1;opt2=val2"
 func parseSSPlugin(s string) map[string]string {
 	opts := make(map[string]string)
 	parts := strings.Split(s, ";")

@@ -278,15 +278,33 @@ func (s *Store) UpsertScore(score *model.Score) error {
 	return err
 }
 
-// ListConfigs returns all configs ordered by score (best first).
-func (s *Store) ListConfigs(limit int) ([]*model.ProxyConfig, error) {
-	rows, err := s.db.Query(`
-		SELECT c.data
-		FROM configs c
-		LEFT JOIN scores s ON c.id = s.config_id
-		ORDER BY COALESCE(s.composite, 999999) ASC
-		LIMIT ?
-	`, limit)
+// ListConfigsFiltered returns configs ordered by score, optionally filtered by protocol.
+func (s *Store) ListConfigsFiltered(protocol string, limit int) ([]*model.ProxyConfig, error) {
+	var query string
+	var args []interface{}
+
+	if protocol != "" {
+		query = `
+			SELECT c.data
+			FROM configs c
+			LEFT JOIN scores s ON c.id = s.config_id
+			WHERE c.protocol = ?
+			ORDER BY COALESCE(s.composite, 999999) ASC
+			LIMIT ?
+		`
+		args = []interface{}{protocol, limit}
+	} else {
+		query = `
+			SELECT c.data
+			FROM configs c
+			LEFT JOIN scores s ON c.id = s.config_id
+			ORDER BY COALESCE(s.composite, 999999) ASC
+			LIMIT ?
+		`
+		args = []interface{}{limit}
+	}
+
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -305,6 +323,11 @@ func (s *Store) ListConfigs(limit int) ([]*model.ProxyConfig, error) {
 		configs = append(configs, &cfg)
 	}
 	return configs, rows.Err()
+}
+
+// ListConfigs returns all configs ordered by score (best first).
+func (s *Store) ListConfigs(limit int) ([]*model.ProxyConfig, error) {
+	return s.ListConfigsFiltered("", limit)
 }
 
 // GetConfigsByIDs returns configs matching the given IDs.

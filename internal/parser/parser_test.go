@@ -181,9 +181,41 @@ func TestParseUnknownScheme(t *testing.T) {
 	}
 }
 
+func TestParseHysteria2(t *testing.T) {
+	uri := "hysteria2://mytoken@example.com:443?sni=example.com&insecure=1&obfs=salamander&obfs-password=secretpass#test-hy2"
+
+	cfg, err := ParseURI(uri)
+	if err != nil {
+		t.Fatalf("ParseURI() error: %v", err)
+	}
+
+	if cfg.Protocol != model.ProtocolHysteria2 {
+		t.Errorf("Protocol = %v, want %v", cfg.Protocol, model.ProtocolHysteria2)
+	}
+	if cfg.Address != "example.com" {
+		t.Errorf("Address = %v, want example.com", cfg.Address)
+	}
+	if cfg.Port != 443 {
+		t.Errorf("Port = %v, want 443", cfg.Port)
+	}
+	if cfg.Hysteria2Auth != "mytoken" {
+		t.Errorf("Hysteria2Auth = %v, want mytoken", cfg.Hysteria2Auth)
+	}
+	if cfg.Hysteria2Obfs != "salamander" {
+		t.Errorf("Hysteria2Obfs = %v, want salamander", cfg.Hysteria2Obfs)
+	}
+	if cfg.Hysteria2ObfsPass != "secretpass" {
+		t.Errorf("Hysteria2ObfsPass = %v, want secretpass", cfg.Hysteria2ObfsPass)
+	}
+	if !cfg.AllowInsecure {
+		t.Errorf("AllowInsecure = %v, want true", cfg.AllowInsecure)
+	}
+}
+
 func TestParseEmptyURI(t *testing.T) {
 	_, err := ParseURI("")
 	if err == nil {
 		t.Fatal("expected error for empty URI")
 	}
 }
+

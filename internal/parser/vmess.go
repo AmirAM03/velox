@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,17 @@ type vmessJSON struct {
 func (p *vmessParser) Parse(uri string) (*model.ProxyConfig, error) {
 	// Strip scheme
 	encoded := strings.TrimPrefix(uri, "vmess://")
+	encoded = strings.TrimSpace(encoded)
+
+	// Extract remark from fragment if present
+	var remark string
+	if idx := strings.LastIndex(encoded, "#"); idx != -1 {
+		remark = encoded[idx+1:]
+		encoded = encoded[:idx]
+		if unescaped, err := url.QueryUnescape(remark); err == nil {
+			remark = unescaped
+		}
+	}
 	encoded = strings.TrimSpace(encoded)
 
 	// Decode base64 (handle both standard and URL-safe, with and without padding)
@@ -107,9 +119,14 @@ func (p *vmessParser) Parse(uri string) (*model.ProxyConfig, error) {
 		}
 	}
 
+	name := v.PS
+	if name == "" && remark != "" {
+		name = remark
+	}
+
 	now := time.Now()
 	config := &model.ProxyConfig{
-		Name:          v.PS,
+		Name:          name,
 		Protocol:      model.ProtocolVMess,
 		Address:       v.Add,
 		Port:          port,

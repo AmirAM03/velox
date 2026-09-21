@@ -2,8 +2,6 @@ package parser
 
 import (
 	"fmt"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -11,8 +9,7 @@ import (
 )
 
 // vlessParser handles vless:// URIs.
-// VLESS URIs follow the standard URI format:
-// vless://uuid@host:port?params#fragment
+// Format: vless://uuid@host:port?params#fragment
 type vlessParser struct{}
 
 func init() {
@@ -22,35 +19,30 @@ func init() {
 func (p *vlessParser) Scheme() string { return "vless" }
 
 func (p *vlessParser) Parse(uri string) (*model.ProxyConfig, error) {
-	// Parse as standard URL (vless://uuid@host:port?params#fragment)
-	u, err := url.Parse(uri)
+	parsed, err := SplitProxyURI(uri)
 	if err != nil {
-		return nil, fmt.Errorf("url parse: %w", err)
+		return nil, fmt.Errorf("split vless URI: %w", err)
 	}
 
-	// Extract UUID from userinfo
-	uuid := u.User.Username()
+	uuid := parsed.UserInfo
 	if uuid == "" {
 		return nil, fmt.Errorf("missing UUID in userinfo")
 	}
 
-	// Extract host and port
-	host := u.Hostname()
+	host := parsed.Host
 	if host == "" {
 		return nil, fmt.Errorf("missing server address")
 	}
 
-	portStr := u.Port()
-	if portStr == "" {
-		return nil, fmt.Errorf("missing port")
+	port := parsed.Port
+	if port <= 0 {
+		port = 443
 	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port <= 0 || port > 65535 {
-		return nil, fmt.Errorf("invalid port: %q", portStr)
+	if port > 65535 {
+		return nil, fmt.Errorf("invalid port: %d", port)
 	}
 
-	// Query parameters
-	q := u.Query()
+	q := parsed.Query
 
 	// Transport type
 	network := mapNetwork(q.Get("type"))
@@ -79,19 +71,26 @@ func (p *vlessParser) Parse(uri string) (*model.ProxyConfig, error) {
 	// Fingerprint
 	fp := q.Get("fp")
 
+	// Allow insecure
+	allowInsecure := q.Get("insecure") == "1" ||
+		strings.EqualFold(q.Get("insecure"), "true") ||
+		q.Get("allowInsecure") == "1" ||
+		strings.EqualFold(q.Get("allowInsecure"), "true")
+
 	// ALPN
 	var alpn []string
 	if alpnStr := q.Get("alpn"); alpnStr != "" {
-		alpn = strings.Split(alpnStr, ",")
-		for i := range alpn {
-			alpn[i] = strings.TrimSpace(alpn[i])
+		for _, a := range strings.Split(alpnStr, ",") {
+			if a = strings.TrimSpace(a); a != "" {
+				alpn = append(alpn, a)
+			}
 		}
 	}
 
 	// Transport options
 	opts := make(map[string]string)
-	if host := q.Get("host"); host != "" {
-		opts["host"] = host
+	if h := q.Get("host"); h != "" {
+		opts["host"] = h
 	}
 	if path := q.Get("path"); path != "" {
 		opts["path"] = path
@@ -111,8 +110,7 @@ func (p *vlessParser) Parse(uri string) (*model.ProxyConfig, error) {
 	realityShortID := q.Get("sid")
 	realitySpiderX := q.Get("spx")
 
-	// Fragment (remark / display name)
-	name := u.Fragment
+	name := parsed.Fragment
 
 	now := time.Now()
 	config := &model.ProxyConfig{
@@ -129,6 +127,7 @@ func (p *vlessParser) Parse(uri string) (*model.ProxyConfig, error) {
 		SNI:              sni,
 		ALPN:             alpn,
 		Fingerprint:      fp,
+		AllowInsecure:    allowInsecure,
 		RealityPublicKey: realityPubKey,
 		RealityShortID:   realityShortID,
 		RealitySpiderX:   realitySpiderX,

@@ -2,8 +2,6 @@ package parser
 
 import (
 	"fmt"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,33 +19,30 @@ func init() {
 func (p *trojanParser) Scheme() string { return "trojan" }
 
 func (p *trojanParser) Parse(uri string) (*model.ProxyConfig, error) {
-	u, err := url.Parse(uri)
+	parsed, err := SplitProxyURI(uri)
 	if err != nil {
-		return nil, fmt.Errorf("url parse: %w", err)
+		return nil, fmt.Errorf("split trojan URI: %w", err)
 	}
 
-	// Extract password from userinfo
-	password := u.User.Username()
+	password := parsed.UserInfo
 	if password == "" {
 		return nil, fmt.Errorf("missing password in userinfo")
 	}
 
-	// Host and port
-	host := u.Hostname()
+	host := parsed.Host
 	if host == "" {
 		return nil, fmt.Errorf("missing server address")
 	}
 
-	portStr := u.Port()
-	if portStr == "" {
-		portStr = "443" // Trojan defaults to 443
+	port := parsed.Port
+	if port <= 0 {
+		port = 443
 	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port <= 0 || port > 65535 {
-		return nil, fmt.Errorf("invalid port: %q", portStr)
+	if port > 65535 {
+		return nil, fmt.Errorf("invalid port: %d", port)
 	}
 
-	q := u.Query()
+	q := parsed.Query
 
 	// Transport
 	network := mapNetwork(q.Get("type"))
@@ -70,9 +65,10 @@ func (p *trojanParser) Parse(uri string) (*model.ProxyConfig, error) {
 	// ALPN
 	var alpn []string
 	if alpnStr := q.Get("alpn"); alpnStr != "" {
-		alpn = strings.Split(alpnStr, ",")
-		for i := range alpn {
-			alpn[i] = strings.TrimSpace(alpn[i])
+		for _, a := range strings.Split(alpnStr, ",") {
+			if a = strings.TrimSpace(a); a != "" {
+				alpn = append(alpn, a)
+			}
 		}
 	}
 
@@ -100,9 +96,12 @@ func (p *trojanParser) Parse(uri string) (*model.ProxyConfig, error) {
 	realitySpiderX := q.Get("spx")
 
 	// Allow insecure
-	allowInsecure := q.Get("allowInsecure") == "1" || strings.EqualFold(q.Get("allowInsecure"), "true")
+	allowInsecure := q.Get("allowInsecure") == "1" ||
+		strings.EqualFold(q.Get("allowInsecure"), "true") ||
+		q.Get("insecure") == "1" ||
+		strings.EqualFold(q.Get("insecure"), "true")
 
-	name := u.Fragment
+	name := parsed.Fragment
 
 	now := time.Now()
 	config := &model.ProxyConfig{

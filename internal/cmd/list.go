@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/AmirAM03/velox/internal/model"
 	"github.com/AmirAM03/velox/internal/storage"
 )
 
@@ -68,21 +67,9 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Load configs
-	configs, err := store.ListConfigs(limit)
+	configs, err := store.ListConfigsFiltered(strings.ToLower(protocol), limit)
 	if err != nil {
 		return fmt.Errorf("load configs: %w", err)
-	}
-
-	// Filter by protocol
-	if protocol != "" {
-		protocol = strings.ToLower(protocol)
-		var filtered []*model.ProxyConfig
-		for _, cfg := range configs {
-			if string(cfg.Protocol) == protocol {
-				filtered = append(filtered, cfg)
-			}
-		}
-		configs = filtered
 	}
 
 	fmt.Printf("\n%-4s %-8s %-40s %-22s %-10s\n", "#", "Proto", "Name", "Server", "Score")
