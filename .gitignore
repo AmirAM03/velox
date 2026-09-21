@@ -9,10 +9,12 @@ release_build/
 *.so
 *.dylib
 
-# Test
+# Test & Analysis
 coverage.out
 coverage.html
 *.test
+analysis/
+tmp_analysis/
 
 # Go
 vendor/
