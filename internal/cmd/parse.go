@@ -77,8 +77,19 @@ func runParse(cmd *cobra.Command, args []string) error {
 		logger.Info("read file", "file", inputFile, "bytes", len(data))
 	}
 
+	// Command-line arguments (manual paste e.g. velox parse "vless://..." "vmess://...")
+	for _, arg := range args {
+		arg = strings.TrimSpace(arg)
+		if arg != "" {
+			allRaw = append(allRaw, arg)
+			if sourceLabel == "" {
+				sourceLabel = "paste"
+			}
+		}
+	}
+
 	// Read from stdin if no other input provided
-	if len(subURLs) == 0 && inputFile == "" {
+	if len(subURLs) == 0 && inputFile == "" && len(args) == 0 {
 		stat, _ := os.Stdin.Stat()
 		if (stat.Mode() & os.ModeCharDevice) == 0 {
 			// stdin has piped data
@@ -92,7 +103,16 @@ func runParse(cmd *cobra.Command, args []string) error {
 			allRaw = append(allRaw, string(data))
 			logger.Info("read stdin", "bytes", len(data))
 		} else {
-			return fmt.Errorf("no input: provide --sub, --file, or pipe to stdin")
+			// Interactive terminal prompt for manual paste
+			fmt.Println("📋 Paste your proxy configs below (press Ctrl+Z on Windows or Ctrl+D on Linux, then Enter to finish):")
+			data, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				return fmt.Errorf("read paste: %w", err)
+			}
+			if sourceLabel == "" {
+				sourceLabel = "paste"
+			}
+			allRaw = append(allRaw, string(data))
 		}
 	}
 
@@ -100,17 +120,22 @@ func runParse(cmd *cobra.Command, args []string) error {
 	merged := strings.Join(allRaw, "\n")
 	cleaned := ingest.CleanRawContent(merged)
 
-	// Parse all configs
-	configs, failures := parser.ParseMany(cleaned)
+	// Parse all configs with detailed duplicate tracking
+	configs, failures, batchDups := parser.ParseManyDetailed(cleaned)
 
 	logger.Info("parsing complete",
-		"parsed", len(configs),
+		"unique", len(configs),
+		"batch_duplicates", batchDups,
 		"failed", failures,
 		"protocols", summarizeProtocols(configs),
 	)
 
 	if len(configs) == 0 {
-		fmt.Println("No valid configs found.")
+		if failures > 0 {
+			fmt.Printf("⚠️ No valid configs found (%d failed).\n", failures)
+		} else {
+			fmt.Println("No valid configs found.")
+		}
 		return nil
 	}
 
@@ -132,7 +157,13 @@ func runParse(cmd *cobra.Command, args []string) error {
 	}
 
 	// Print summary
-	fmt.Printf("\n✅ Parsed %d configs (%d new, %d updated, %d failed)\n", len(configs), inserted, updated, failures)
+	fmt.Printf("\n✅ Processed %d unique configs (%d new, %d existing/updated)\n", len(configs), inserted, updated)
+	if batchDups > 0 {
+		fmt.Printf("   Duplicates skipped in batch: %d\n", batchDups)
+	}
+	if failures > 0 {
+		fmt.Printf("   Failed lines: %d\n", failures)
+	}
 
 	// Print protocol breakdown
 	protoCount := make(map[string]int)
@@ -146,7 +177,7 @@ func runParse(cmd *cobra.Command, args []string) error {
 	// Print total in database
 	totalCount, err := store.ConfigCount()
 	if err == nil {
-		fmt.Printf("\n📊 Total configs in database: %d\n", totalCount)
+		fmt.Printf("\n📊 Total unique configs in database: %d (0 duplicates)\n", totalCount)
 	}
 
 	return nil

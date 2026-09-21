@@ -61,6 +61,16 @@ func ParseURI(uri string) (*model.ProxyConfig, error) {
 // (lines starting with # or //), and logs parse errors without failing.
 // Returns all successfully parsed configs and the count of failures.
 func ParseMany(raw string) (configs []*model.ProxyConfig, failures int) {
+	configs, failures, _ = ParseManyDetailed(raw)
+	return configs, failures
+}
+
+// ParseManyDetailed parses multiple URIs, one per line.
+// It returns:
+// - configs: all unique, successfully parsed ProxyConfigs
+// - failures: count of unparseable lines
+// - duplicates: count of redundant configs skipped in this batch
+func ParseManyDetailed(raw string) (configs []*model.ProxyConfig, failures int, duplicates int) {
 	lines := strings.Split(raw, "\n")
 	seen := make(map[string]struct{})
 
@@ -80,12 +90,13 @@ func ParseMany(raw string) (configs []*model.ProxyConfig, failures int) {
 
 		// Dedup by identity hash
 		if _, dup := seen[config.ID]; dup {
+			duplicates++
 			continue
 		}
 		seen[config.ID] = struct{}{}
 		configs = append(configs, config)
 	}
-	return configs, failures
+	return configs, failures, duplicates
 }
 
 // Schemes returns all registered scheme names.

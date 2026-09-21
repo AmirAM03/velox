@@ -44,6 +44,7 @@ your custom target URLs, and connect through the fastest working proxy.`,
 	rootCmd.AddCommand(newTestCmd())
 	rootCmd.AddCommand(newListCmd())
 	rootCmd.AddCommand(newConnectCmd())
+	rootCmd.AddCommand(newDedupCmd())
 
 	return rootCmd
 }

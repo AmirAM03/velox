@@ -109,19 +109,150 @@ type ProxyConfig struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// Hash computes a SHA-256 identity hash from the fields that uniquely identify
-// a proxy server. Two configs with different names but same server/auth/transport
-// are considered duplicates.
+// Normalize canonicalizes all fields of the ProxyConfig:
+// - Trims leading/trailing whitespace
+// - Normalizes address (lowercase, removes IPv6 brackets e.g. [::1] -> ::1)
+// - Lowercases UUID (UUIDs are hex characters)
+// - Lowercases domain headers and SNI
+// - Normalizes transport paths (e.g. "" -> "/", "/ws/" -> "/ws")
+// - Sets default ports if unset (443 for TLS/Trojan/VLESS/Hysteria)
+// - Normalizes encryption/network/security to lowercase
+func (c *ProxyConfig) Normalize() {
+	c.Protocol = Protocol(strings.ToLower(strings.TrimSpace(string(c.Protocol))))
+
+	// Address
+	c.Address = strings.ToLower(strings.TrimSpace(c.Address))
+	c.Address = strings.TrimPrefix(c.Address, "[")
+	c.Address = strings.TrimSuffix(c.Address, "]")
+
+	// Port defaults
+	if c.Port <= 0 {
+		switch c.Protocol {
+		case ProtocolTrojan, ProtocolVLESS, ProtocolHysteria2:
+			c.Port = 443
+		case ProtocolVMess:
+			if c.Security == SecurityTLS {
+				c.Port = 443
+			} else {
+				c.Port = 80
+			}
+		case ProtocolShadowsocks:
+			c.Port = 8388
+		}
+	}
+
+	// UUID
+	c.UUID = strings.ToLower(strings.TrimSpace(c.UUID))
+
+	// Password / Auth
+	c.Password = strings.TrimSpace(c.Password)
+	c.Hysteria2Auth = strings.TrimSpace(c.Hysteria2Auth)
+	if c.Hysteria2Auth != "" && c.Password == "" {
+		c.Password = c.Hysteria2Auth
+	} else if c.Password != "" && c.Hysteria2Auth == "" && c.Protocol == ProtocolHysteria2 {
+		c.Hysteria2Auth = c.Password
+	}
+
+	// Encryption / Flow
+	c.Encryption = strings.ToLower(strings.TrimSpace(c.Encryption))
+	c.Flow = strings.ToLower(strings.TrimSpace(c.Flow))
+
+	// Network
+	c.Network = Network(strings.ToLower(strings.TrimSpace(string(c.Network))))
+	if c.Network == "" {
+		c.Network = NetworkTCP
+	}
+
+	// Security
+	c.Security = Security(strings.ToLower(strings.TrimSpace(string(c.Security))))
+	if c.Security == "" {
+		c.Security = SecurityNone
+	}
+
+	// SNI
+	c.SNI = strings.ToLower(strings.TrimSpace(c.SNI))
+
+	// Transport options normalization
+	if c.TransportOpts != nil {
+		normalizedOpts := make(map[string]string)
+		for k, v := range c.TransportOpts {
+			k = strings.TrimSpace(k)
+			v = strings.TrimSpace(v)
+			if k == "" || v == "" {
+				continue
+			}
+			switch strings.ToLower(k) {
+			case "host":
+				normalizedOpts["host"] = strings.ToLower(v)
+			case "path":
+				if v == "" || v == "/" {
+					v = "/"
+				} else {
+					if !strings.HasPrefix(v, "/") {
+						v = "/" + v
+					}
+					if len(v) > 1 && strings.HasSuffix(v, "/") {
+						v = strings.TrimSuffix(v, "/")
+					}
+				}
+				normalizedOpts["path"] = v
+			case "servicename":
+				normalizedOpts["serviceName"] = v
+			default:
+				normalizedOpts[k] = v
+			}
+		}
+		c.TransportOpts = normalizedOpts
+	}
+
+	// REALITY keys
+	c.RealityPublicKey = strings.TrimSpace(c.RealityPublicKey)
+	c.RealityShortID = strings.ToLower(strings.TrimSpace(c.RealityShortID))
+
+	// Remark / Name
+	c.Name = strings.TrimSpace(c.Name)
+}
+
+// Hash computes a deterministic 32-character hex SHA-256 identity hash
+// from the normalized fields that uniquely identify a proxy node.
+// Any variation in display name/remark, source label, or superficial parameter
+// casing does NOT change this hash, guaranteeing deduplication.
 func (c *ProxyConfig) Hash() string {
-	identity := fmt.Sprintf("%s|%s|%d|%s|%s|%s|%s|%s",
+	c.Normalize()
+
+	path := "/"
+	hostHeader := ""
+	svcName := ""
+	if c.TransportOpts != nil {
+		if p, ok := c.TransportOpts["path"]; ok && p != "" {
+			path = p
+		}
+		hostHeader = c.TransportOpts["host"]
+		svcName = c.TransportOpts["serviceName"]
+	}
+
+	auth := c.Password
+	if auth == "" {
+		auth = c.Hysteria2Auth
+	}
+
+	identity := fmt.Sprintf("%s|%s|%d|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
 		c.Protocol,
-		strings.ToLower(c.Address),
+		c.Address,
 		c.Port,
 		c.UUID,
-		c.Password,
+		auth,
 		c.Encryption,
 		c.Network,
 		c.Security,
+		c.SNI,
+		c.Flow,
+		path,
+		hostHeader,
+		svcName,
+		c.RealityPublicKey,
+		c.RealityShortID,
+		c.Hysteria2Obfs,
 	)
 	sum := sha256.Sum256([]byte(identity))
 	return fmt.Sprintf("%x", sum[:16]) // 32-char hex

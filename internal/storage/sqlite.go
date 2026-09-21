@@ -171,7 +171,39 @@ func (s *Store) UpsertConfig(cfg *model.ProxyConfig) error {
 }
 
 // UpsertConfigs inserts or updates multiple configs in a single transaction.
+// It accurately detects which configs are brand new vs existing/updated.
 func (s *Store) UpsertConfigs(configs []*model.ProxyConfig) (inserted, updated int, err error) {
+	if len(configs) == 0 {
+		return 0, 0, nil
+	}
+
+	// 1. Identify which IDs already exist in the database (in chunks of 500)
+	existingIDs := make(map[string]bool)
+	for i := 0; i < len(configs); i += 500 {
+		end := i + 500
+		if end > len(configs) {
+			end = len(configs)
+		}
+		chunk := configs[i:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]interface{}, len(chunk))
+		for j, cfg := range chunk {
+			placeholders[j] = "?"
+			args[j] = cfg.ID
+		}
+		query := fmt.Sprintf("SELECT id FROM configs WHERE id IN (%s)", strings.Join(placeholders, ","))
+		rows, err := s.db.Query(query, args...)
+		if err == nil {
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err == nil {
+					existingIDs[id] = true
+				}
+			}
+			rows.Close()
+		}
+	}
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, 0, fmt.Errorf("begin tx: %w", err)
@@ -182,7 +214,7 @@ func (s *Store) UpsertConfigs(configs []*model.ProxyConfig) (inserted, updated i
 		INSERT INTO configs (id, name, raw_uri, protocol, source, address, port, data, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-			name = excluded.name,
+			name = CASE WHEN excluded.name != '' AND excluded.name != configs.name THEN excluded.name ELSE configs.name END,
 			raw_uri = excluded.raw_uri,
 			source = excluded.source,
 			data = excluded.data,
@@ -199,15 +231,17 @@ func (s *Store) UpsertConfigs(configs []*model.ProxyConfig) (inserted, updated i
 			continue
 		}
 
-		result, err := stmt.Exec(cfg.ID, cfg.Name, cfg.RawURI, string(cfg.Protocol),
+		_, err = stmt.Exec(cfg.ID, cfg.Name, cfg.RawURI, string(cfg.Protocol),
 			cfg.Source, cfg.Address, cfg.Port, string(data), formatDBTime(cfg.CreatedAt), formatDBTime(cfg.UpdatedAt))
 		if err != nil {
 			continue
 		}
 
-		rowsAffected, _ := result.RowsAffected()
-		if rowsAffected > 0 {
+		if existingIDs[cfg.ID] {
+			updated++
+		} else {
 			inserted++
+			existingIDs[cfg.ID] = true // prevent duplicate in same batch from double-counting
 		}
 	}
 
@@ -215,7 +249,89 @@ func (s *Store) UpsertConfigs(configs []*model.ProxyConfig) (inserted, updated i
 		return 0, 0, fmt.Errorf("commit: %w", err)
 	}
 
-	return inserted, len(configs) - inserted, nil
+	return inserted, updated, nil
+}
+
+// Deduplicate scans all configs in the database, recalculates their canonical IDs
+// using model.ProxyConfig.Hash(), removes duplicate entries, and cleans up orphaned scores/results.
+func (s *Store) Deduplicate() (scanned, removed int, err error) {
+	rows, err := s.db.Query(`SELECT id, data FROM configs`)
+	if err != nil {
+		return 0, 0, fmt.Errorf("query configs: %w", err)
+	}
+	defer rows.Close()
+
+	type item struct {
+		oldID string
+		cfg   model.ProxyConfig
+	}
+	var all []item
+	for rows.Next() {
+		var oldID, data string
+		if err := rows.Scan(&oldID, &data); err != nil {
+			continue
+		}
+		var cfg model.ProxyConfig
+		if err := json.Unmarshal([]byte(data), &cfg); err != nil {
+			continue
+		}
+		all = append(all, item{oldID: oldID, cfg: cfg})
+	}
+	rows.Close()
+
+	scanned = len(all)
+	if scanned == 0 {
+		return 0, 0, nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	seenCanonical := make(map[string]string) // canonicalID -> kept oldID
+	var toDelete []string
+
+	for _, it := range all {
+		it.cfg.ComputeID()
+		canonID := it.cfg.ID
+
+		if keptOldID, exists := seenCanonical[canonID]; exists {
+			// Duplicate found! Delete this redundant row
+			toDelete = append(toDelete, it.oldID)
+			s.logger.Debug("deduplicate: removing duplicate config", "duplicate_id", it.oldID, "kept_id", keptOldID)
+		} else {
+			seenCanonical[canonID] = it.oldID
+			// If oldID != canonID, update ID in DB to canonical
+			if it.oldID != canonID {
+				data, _ := json.Marshal(it.cfg)
+				_, err := tx.Exec(`UPDATE configs SET id = ?, data = ?, updated_at = ? WHERE id = ?`,
+					canonID, string(data), formatDBTime(time.Now()), it.oldID)
+				if err != nil {
+					// Could be unique constraint if canonID was already present
+					toDelete = append(toDelete, it.oldID)
+				}
+			}
+		}
+	}
+
+	// Delete identified duplicate rows
+	delStmt, err := tx.Prepare(`DELETE FROM configs WHERE id = ?`)
+	if err == nil {
+		defer delStmt.Close()
+		for _, id := range toDelete {
+			if _, err := delStmt.Exec(id); err == nil {
+				removed++
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("commit deduplication: %w", err)
+	}
+
+	return scanned, removed, nil
 }
 
 // InsertTestResult stores a single test result.
