@@ -21,6 +21,21 @@ See the [Ubuntu Deployment Guide](docs/ubuntu.md) for full setup and tuning inst
 
 ---
 
+## 🗑️ Easy Uninstall (Linux / Ubuntu)
+
+To cleanly remove Velox, stop systemd services, remove binaries and system configs:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AmirAM03/velox/main/uninstall.sh | sudo bash
+```
+
+To perform a **deep clean** (also purging all user configs and databases in `~/.velox`):
+```bash
+curl -fsSL https://raw.githubusercontent.com/AmirAM03/velox/main/uninstall.sh | sudo bash -s -- --purge
+```
+
+---
+
 ## Features
 
 - 🚀 **High-Volume Ingestion** — VMess, VLESS (REALITY, Vision), Trojan, Shadowsocks, WireGuard.

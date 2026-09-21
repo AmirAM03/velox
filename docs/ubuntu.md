@@ -147,3 +147,21 @@ ulimit -n 65535
 ```
 
 The installed `velox.service` already includes `LimitNOFILE=65535` out-of-the-box.
+
+---
+
+## 6. Uninstallation & Cleanup
+
+To cleanly remove Velox from your Ubuntu machine:
+
+```bash
+# Standard uninstall (removes binary, systemd service, and /etc/velox)
+curl -fsSL https://raw.githubusercontent.com/AmirAM03/velox/main/uninstall.sh | sudo bash
+```
+
+To perform a **deep clean** (which also removes user databases and configs in `~/.velox`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AmirAM03/velox/main/uninstall.sh | sudo bash -s -- --purge
+```
+
