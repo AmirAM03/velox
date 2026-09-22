@@ -46,7 +46,7 @@ cat configs.txt | velox parse
 Run the multi-stage testing pipeline against user-defined target URLs:
 
 ```bash
-# Test against default targets (gstatic 204)
+# Test against default target (Google 204)
 velox test
 
 # Test against custom target addresses
@@ -161,4 +161,12 @@ To perform a **deep clean** (which also removes user databases and configs in `~
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AmirAM03/velox/main/uninstall.sh | sudo bash -s -- --purge
 ```
+
+---
+
+## 7. Related Documentation
+
+- [Windows User Guide](windows.md) — Setup and usage on Windows 10/11.
+- [Architecture & Internals](architecture.md) — Technical deep-dive into the pipeline, scoring math, and storage.
+- [Configuration Manual](configuration.md) — Detailed reference for `config.yaml`.
 
