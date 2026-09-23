@@ -17,7 +17,7 @@
         <div class="brand-logo">⚡</div>
         <div class="brand-text">
           <span class="brand-title">VELOX</span>
-          <span class="brand-badge">v0.1.4</span>
+          <span class="brand-badge">v0.1.6</span>
         </div>
       </div>
 
@@ -27,6 +27,7 @@
         <button class="nav-btn" data-tab="ingest">Ingest & Parse</button>
         <button class="nav-btn" data-tab="benchmark">Benchmark</button>
         <button class="nav-btn" data-tab="tools">Database Tools</button>
+        <button class="nav-btn" data-tab="console">Live Console</button>
       </nav>
 
       <div class="nav-status-group">
@@ -242,14 +243,20 @@
         <div class="dashboard-header">
           <div>
             <h1 class="page-title">Speed & Latency Benchmark</h1>
-            <p class="page-subtitle">3-Stage concurrent pipeline test towards real-world destination endpoints</p>
+            <p class="page-subtitle">3-Stage concurrent pipeline test with real-time telemetry streaming</p>
+          </div>
+          <div class="actions-group">
+            <span id="benchmark-header-status" class="status-pill idle">
+              <span class="status-dot"></span>
+              <span id="benchmark-header-text">Ready</span>
+            </span>
           </div>
         </div>
 
-        <div class="two-col-grid">
+        <div class="benchmark-grid">
           <!-- Benchmark Configuration -->
-          <div class="glass-card">
-            <h3 class="card-title mb-3">Target & Settings</h3>
+          <div class="glass-card benchmark-cfg-card">
+            <h3 class="card-title mb-3">Target & Concurrency Settings</h3>
             
             <div class="form-group mb-3">
               <label class="form-label">Destination URL Presets</label>
@@ -267,7 +274,17 @@
             <div class="form-group mb-3">
               <label class="form-label" for="benchmark-target-input">Target URL</label>
               <input type="url" id="benchmark-target-input" class="form-input" value="https://www.google.com/generate_204" placeholder="https://www.google.com/generate_204">
-              <span class="text-muted text-xs mt-1">Accepts any destination URL. Real round-trip delay (TTFB) will be measured through each proxy.</span>
+              <span class="text-muted text-xs mt-1">Accepts any destination URL. Real round-trip delay (TTFB) is measured through each node.</span>
+            </div>
+
+            <div class="form-group mb-3">
+              <label class="form-label" for="benchmark-scope-select">Benchmark Scope</label>
+              <select id="benchmark-scope-select" class="form-input">
+                <option value="all">All Configurations in Database</option>
+                <option value="untested">Untested Nodes Only</option>
+                <option value="top100">Top 100 Stored Nodes</option>
+                <option value="top500">Top 500 Stored Nodes</option>
+              </select>
             </div>
 
             <div class="form-group mb-3">
@@ -282,19 +299,98 @@
             </div>
 
             <div class="form-group mb-4">
-              <label class="form-label" for="benchmark-limit-input">Max Configs to Test</label>
-              <input type="number" id="benchmark-limit-input" class="form-input" value="50" min="1" max="10000">
+              <div class="flex-between mb-1">
+                <label class="form-label mb-0" for="benchmark-threads-input">Parallel Threads / Concurrency</label>
+                <span id="threads-indicator-label" class="text-xs font-mono text-cyan">100 Threads</span>
+              </div>
+              <div class="input-with-chips">
+                <input type="number" id="benchmark-threads-input" class="form-input" value="100" min="1" max="1000">
+                <div class="thread-chips-group mt-2">
+                  <button type="button" class="chip-btn" data-threads="50">50</button>
+                  <button type="button" class="chip-btn active" data-threads="100">100 (Default)</button>
+                  <button type="button" class="chip-btn" data-threads="200">200</button>
+                  <button type="button" class="chip-btn" data-threads="500">500 (Max Speed)</button>
+                </div>
+              </div>
+              <span class="text-muted text-xs mt-1">Multi-worker concurrency for DNS, TLS handshakes, and in-process proxy TTFB measurements.</span>
             </div>
 
-            <button id="btn-start-benchmark" class="btn btn-primary w-full">Start Benchmark</button>
+            <div class="benchmark-actions-row">
+              <button id="btn-start-benchmark" class="btn btn-primary w-full">⚡ Start Parallel Benchmark</button>
+              <button id="btn-cancel-benchmark" class="btn btn-danger w-full hidden">🛑 Cancel Benchmark</button>
+            </div>
           </div>
 
-          <!-- Benchmark Live Progress -->
-          <div class="glass-card">
-            <h3 class="card-title mb-3">Benchmark Telemetry & Results</h3>
-            <div id="benchmark-status-box" class="ingest-empty-state">
-              <div class="empty-icon">⏱️</div>
-              <p>No test currently running. Select a target preset on the left and click "Start Benchmark" to measure real delay.</p>
+          <!-- Benchmark Live Progress & Streaming Table -->
+          <div class="glass-card benchmark-live-card">
+            <div class="card-header pb-2">
+              <div>
+                <h3 class="card-title">Live Telemetry & Real-Time Stream</h3>
+                <span id="benchmark-stage-label" class="text-xs text-muted">Ready to test</span>
+              </div>
+              <div class="status-tags">
+                <span id="benchmark-status-badge" class="badge">Idle</span>
+              </div>
+            </div>
+
+            <!-- Progress Bar -->
+            <div class="progress-container mb-3" id="benchmark-progress-container">
+              <div class="progress-bar-track">
+                <div id="benchmark-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
+              </div>
+              <div class="progress-meta mt-1">
+                <span id="benchmark-progress-pct" class="text-xs font-mono">0%</span>
+                <span id="benchmark-progress-counts" class="text-xs text-muted font-mono">0 / 0 nodes</span>
+              </div>
+            </div>
+
+            <!-- Live Stats Row -->
+            <div class="live-stats-row mb-3">
+              <div class="live-stat-pill">
+                <span class="pill-label">Total</span>
+                <span id="stat-live-total" class="pill-val">0</span>
+              </div>
+              <div class="live-stat-pill">
+                <span class="pill-label">Tested</span>
+                <span id="stat-live-tested" class="pill-val">0</span>
+              </div>
+              <div class="live-stat-pill success">
+                <span class="pill-label">Working</span>
+                <span id="stat-live-passed" class="pill-val">0</span>
+              </div>
+              <div class="live-stat-pill danger">
+                <span class="pill-label">Failed</span>
+                <span id="stat-live-failed" class="pill-val">0</span>
+              </div>
+              <div class="live-stat-pill cyan">
+                <span class="pill-label">Fastest</span>
+                <span id="stat-live-fastest" class="pill-val">— ms</span>
+              </div>
+            </div>
+
+            <!-- Live Streaming Results Table -->
+            <div class="table-responsive live-table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Proto</th>
+                    <th>Name</th>
+                    <th>Endpoint</th>
+                    <th>Latency</th>
+                    <th>Stage / Error</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="benchmark-live-tbody">
+                  <tr>
+                    <td colspan="7" class="text-muted text-center py-5">
+                      <div class="empty-icon text-2xl mb-1">⏱️</div>
+                      No benchmark running. Configure settings on the left and click "Start Parallel Benchmark" to watch live streaming node tests.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -334,6 +430,41 @@
                 <span class="text-mono">127.0.0.1:1080</span>
               </div>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 6. LIVE ENGINE CONSOLE VIEW -->
+      <section id="tab-console" class="tab-pane">
+        <div class="dashboard-header">
+          <div>
+            <h1 class="page-title">Live Engine Operations Console</h1>
+            <p class="page-subtitle">Real-time verbosity stream tracking Ingestion, Benchmarks, Routing, and System Proxy</p>
+          </div>
+          <div class="actions-group">
+            <label class="checkbox-label text-xs mr-3">
+              <input type="checkbox" id="console-autoscroll" checked> Auto-scroll
+            </label>
+            <button id="btn-clear-console" class="btn btn-secondary btn-sm">Clear Output</button>
+          </div>
+        </div>
+
+        <div class="glass-card console-card">
+          <div class="console-filter-bar mb-2">
+            <div class="filter-chips">
+              <button class="console-filter-btn active" data-level="all">All Logs</button>
+              <button class="console-filter-btn" data-level="info">Info</button>
+              <button class="console-filter-btn" data-level="success">Success</button>
+              <button class="console-filter-btn" data-level="warn">Warnings</button>
+              <button class="console-filter-btn" data-level="error">Errors</button>
+            </div>
+            <div class="console-status">
+              <span id="console-stream-status" class="text-xs text-emerald">● Live SSE Connected</span>
+            </div>
+          </div>
+
+          <div id="operation-logs-container" class="terminal-box">
+            <div class="terminal-line text-muted">[System] Velox Web Dashboard logging initialized. All engine events will stream here live.</div>
           </div>
         </div>
       </section>

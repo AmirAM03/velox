@@ -12,11 +12,21 @@ const app = {
     configsProto: '',
     configsSearch: '',
     isConnecting: false,
-    isTesting: false,
+    eventSource: null,
+    benchmarkRunning: false,
+    benchmarkTotal: 0,
+    benchmarkTested: 0,
+    benchmarkPassed: 0,
+    benchmarkFailed: 0,
+    benchmarkFastest: 0,
+    logs: [],
+    activeLogLevel: 'all',
+    autoScrollLogs: true,
   },
 
   init() {
     this.bindEvents();
+    this.setupEventSource();
     this.refreshStatus();
     this.loadTopNodes();
     
@@ -117,9 +127,54 @@ const app = {
       });
     });
 
+    // Benchmark Parallel Threads Chips
+    document.querySelectorAll('.thread-chips-group .chip-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.thread-chips-group .chip-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const threadsInput = document.getElementById('benchmark-threads-input');
+        if (threadsInput) {
+          threadsInput.value = btn.dataset.threads;
+        }
+        const label = document.getElementById('threads-indicator-label');
+        if (label) label.textContent = `${btn.dataset.threads} Threads`;
+      });
+    });
+
+    // Benchmark Threads Numeric Input
+    document.getElementById('benchmark-threads-input')?.addEventListener('input', (e) => {
+      const val = parseInt(e.target.value, 10) || 100;
+      const label = document.getElementById('threads-indicator-label');
+      if (label) label.textContent = `${val} Threads`;
+      document.querySelectorAll('.thread-chips-group .chip-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.threads === String(val));
+      });
+    });
+
     // Start Benchmark
     document.getElementById('btn-start-benchmark')?.addEventListener('click', () => {
       this.startBenchmark();
+    });
+
+    // Cancel Benchmark
+    document.getElementById('btn-cancel-benchmark')?.addEventListener('click', () => {
+      this.cancelBenchmark();
+    });
+
+    // Live Console Filters & Controls
+    document.getElementById('btn-clear-console')?.addEventListener('click', () => {
+      this.clearLogs();
+    });
+    document.getElementById('console-autoscroll')?.addEventListener('change', (e) => {
+      this.state.autoScrollLogs = e.target.checked;
+    });
+    document.querySelectorAll('.console-filter-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.console-filter-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        this.state.activeLogLevel = btn.dataset.level;
+        this.renderLogs();
+      });
     });
 
     // Deduplication tool
@@ -412,141 +467,406 @@ const app = {
     }
   },
 
+  setupEventSource() {
+    if (this.state.eventSource) {
+      this.state.eventSource.close();
+    }
+
+    const es = new EventSource('/api/test/stream');
+    this.state.eventSource = es;
+
+    const statusIndicator = document.getElementById('console-stream-status');
+
+    es.onopen = () => {
+      if (statusIndicator) {
+        statusIndicator.textContent = '● Live SSE Connected';
+        statusIndicator.className = 'text-xs text-emerald';
+      }
+    };
+
+    es.onerror = () => {
+      if (statusIndicator) {
+        statusIndicator.textContent = '○ Reconnecting SSE...';
+        statusIndicator.className = 'text-xs text-muted';
+      }
+    };
+
+    es.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        this.handleStreamMessage(msg);
+      } catch (err) {
+        console.error('Failed to parse SSE message', err);
+      }
+    };
+  },
+
+  handleStreamMessage(msg) {
+    switch (msg.type) {
+      case 'snapshot':
+        this.handleSnapshot(msg);
+        break;
+      case 'start':
+        this.handleBenchmarkStart(msg);
+        break;
+      case 'node_result':
+        this.handleNodeResult(msg);
+        break;
+      case 'log':
+        if (msg.entry) {
+          this.appendLog(msg.entry);
+        }
+        break;
+      case 'cancelled':
+        this.handleBenchmarkCancelled(msg);
+        break;
+      case 'complete':
+        this.handleBenchmarkComplete(msg);
+        break;
+    }
+  },
+
+  handleSnapshot(msg) {
+    if (msg.logs && msg.logs.length > 0) {
+      this.state.logs = msg.logs;
+      this.renderLogs();
+    }
+
+    this.state.benchmarkTotal = msg.total || 0;
+    this.state.benchmarkTested = msg.tested || 0;
+    this.state.benchmarkPassed = msg.passed || 0;
+    this.state.benchmarkFailed = msg.failed || 0;
+    this.state.benchmarkFastest = msg.fastest_ms || 0;
+
+    const totalEl = document.getElementById('stat-live-total');
+    const testedEl = document.getElementById('stat-live-tested');
+    const passedEl = document.getElementById('stat-live-passed');
+    const failedEl = document.getElementById('stat-live-failed');
+    const fastestEl = document.getElementById('stat-live-fastest');
+    const stageLabel = document.getElementById('benchmark-stage-label');
+    const statusBadge = document.getElementById('benchmark-status-badge');
+    const headerStatus = document.getElementById('benchmark-header-text');
+    const headerPill = document.getElementById('benchmark-header-status');
+    const startBtn = document.getElementById('btn-start-benchmark');
+    const cancelBtn = document.getElementById('btn-cancel-benchmark');
+
+    if (totalEl) totalEl.textContent = this.state.benchmarkTotal;
+    if (testedEl) testedEl.textContent = this.state.benchmarkTested;
+    if (passedEl) passedEl.textContent = this.state.benchmarkPassed;
+    if (failedEl) failedEl.textContent = this.state.benchmarkFailed;
+    if (fastestEl) fastestEl.textContent = this.state.benchmarkFastest > 0 ? `${Math.round(this.state.benchmarkFastest)} ms` : '— ms';
+
+    if (msg.total > 0) {
+      const pct = Math.min(100, Math.round((this.state.benchmarkTested / msg.total) * 100));
+      const bar = document.getElementById('benchmark-progress-bar');
+      const pctEl = document.getElementById('benchmark-progress-pct');
+      const countsEl = document.getElementById('benchmark-progress-counts');
+      if (bar) bar.style.width = `${pct}%`;
+      if (pctEl) pctEl.textContent = `${pct}%`;
+      if (countsEl) countsEl.textContent = `${this.state.benchmarkTested} / ${msg.total} nodes`;
+    }
+
+    if (msg.status === 'running') {
+      this.state.benchmarkRunning = true;
+      if (startBtn) { startBtn.classList.add('hidden'); startBtn.disabled = true; }
+      if (cancelBtn) cancelBtn.classList.remove('hidden');
+      if (statusBadge) { statusBadge.textContent = 'Running'; statusBadge.className = 'badge badge-primary'; }
+      if (headerStatus) headerStatus.textContent = 'Testing Live';
+      if (headerPill) headerPill.className = 'status-pill active';
+      if (stageLabel) stageLabel.textContent = msg.current_stage || 'Testing...';
+    } else {
+      this.state.benchmarkRunning = false;
+      if (startBtn) { startBtn.classList.remove('hidden'); startBtn.disabled = false; }
+      if (cancelBtn) cancelBtn.classList.add('hidden');
+      if (statusBadge) {
+        statusBadge.textContent = msg.status === 'completed' ? 'Completed' : (msg.status === 'cancelled' ? 'Cancelled' : 'Idle');
+        statusBadge.className = msg.status === 'completed' ? 'badge badge-success' : 'badge';
+      }
+      if (headerStatus) headerStatus.textContent = msg.status === 'completed' ? 'Completed' : 'Ready';
+      if (headerPill) headerPill.className = 'status-pill idle';
+      if (stageLabel) stageLabel.textContent = msg.current_stage || 'Ready to test';
+    }
+
+    if (msg.results && msg.results.length > 0) {
+      const tbody = document.getElementById('benchmark-live-tbody');
+      if (tbody) {
+        tbody.innerHTML = msg.results.slice(0, 100).map(d => this.createNodeRowHtml(d)).join('');
+      }
+    }
+  },
+
+  handleBenchmarkStart(msg) {
+    this.state.benchmarkRunning = true;
+    this.state.benchmarkTotal = msg.total;
+    this.state.benchmarkTested = 0;
+    this.state.benchmarkPassed = 0;
+    this.state.benchmarkFailed = 0;
+    this.state.benchmarkFastest = 0;
+
+    const startBtn = document.getElementById('btn-start-benchmark');
+    const cancelBtn = document.getElementById('btn-cancel-benchmark');
+    if (startBtn) { startBtn.classList.add('hidden'); startBtn.disabled = true; }
+    if (cancelBtn) cancelBtn.classList.remove('hidden');
+
+    const totalEl = document.getElementById('stat-live-total');
+    const testedEl = document.getElementById('stat-live-tested');
+    const passedEl = document.getElementById('stat-live-passed');
+    const failedEl = document.getElementById('stat-live-failed');
+    const fastestEl = document.getElementById('stat-live-fastest');
+    const stageLabel = document.getElementById('benchmark-stage-label');
+    const statusBadge = document.getElementById('benchmark-status-badge');
+    const headerStatus = document.getElementById('benchmark-header-text');
+    const headerPill = document.getElementById('benchmark-header-status');
+    const bar = document.getElementById('benchmark-progress-bar');
+    const pctEl = document.getElementById('benchmark-progress-pct');
+    const countsEl = document.getElementById('benchmark-progress-counts');
+
+    if (totalEl) totalEl.textContent = msg.total;
+    if (testedEl) testedEl.textContent = 0;
+    if (passedEl) passedEl.textContent = 0;
+    if (failedEl) failedEl.textContent = 0;
+    if (fastestEl) fastestEl.textContent = '— ms';
+    if (bar) bar.style.width = '0%';
+    if (pctEl) pctEl.textContent = '0%';
+    if (countsEl) countsEl.textContent = `0 / ${msg.total} nodes`;
+
+    if (stageLabel) stageLabel.textContent = msg.current_stage || 'Stage 0 Reachability';
+    if (statusBadge) { statusBadge.textContent = 'Running'; statusBadge.className = 'badge badge-primary'; }
+    if (headerStatus) headerStatus.textContent = 'Testing Live';
+    if (headerPill) headerPill.className = 'status-pill active';
+
+    const tbody = document.getElementById('benchmark-live-tbody');
+    if (tbody) {
+      tbody.innerHTML = `<tr><td colspan="7" class="text-center py-4 text-cyan">⚡ Benchmark active across ${msg.threads} parallel threads. Streaming results...</td></tr>`;
+    }
+  },
+
+  handleNodeResult(msg) {
+    this.state.benchmarkTested = msg.tested;
+    this.state.benchmarkPassed = msg.passed;
+    this.state.benchmarkFailed = msg.failed;
+    this.state.benchmarkFastest = msg.fastest_ms;
+
+    const testedEl = document.getElementById('stat-live-tested');
+    const passedEl = document.getElementById('stat-live-passed');
+    const failedEl = document.getElementById('stat-live-failed');
+    const fastestEl = document.getElementById('stat-live-fastest');
+    const stageLabel = document.getElementById('benchmark-stage-label');
+    const bar = document.getElementById('benchmark-progress-bar');
+    const pctEl = document.getElementById('benchmark-progress-pct');
+    const countsEl = document.getElementById('benchmark-progress-counts');
+
+    if (testedEl) testedEl.textContent = msg.tested;
+    if (passedEl) passedEl.textContent = msg.passed;
+    if (failedEl) failedEl.textContent = msg.failed;
+    if (fastestEl && msg.fastest_ms > 0) fastestEl.textContent = `${Math.round(msg.fastest_ms)} ms`;
+    if (stageLabel && msg.current_stage) stageLabel.textContent = msg.current_stage;
+
+    if (this.state.benchmarkTotal > 0) {
+      const pct = Math.min(100, Math.round((msg.tested / this.state.benchmarkTotal) * 100));
+      if (bar) bar.style.width = `${pct}%`;
+      if (pctEl) pctEl.textContent = `${pct}%`;
+      if (countsEl) countsEl.textContent = `${msg.tested} / ${this.state.benchmarkTotal} nodes`;
+    }
+
+    if (msg.detail) {
+      const tbody = document.getElementById('benchmark-live-tbody');
+      if (tbody) {
+        if (tbody.children.length === 1 && tbody.children[0].querySelector('td[colspan]')) {
+          tbody.innerHTML = '';
+        }
+        const rowHtml = this.createNodeRowHtml(msg.detail);
+        tbody.insertAdjacentHTML('afterbegin', rowHtml);
+
+        if (tbody.children.length > 150) {
+          tbody.lastElementChild.remove();
+        }
+      }
+    }
+  },
+
+  handleBenchmarkComplete(msg) {
+    this.state.benchmarkRunning = false;
+    const startBtn = document.getElementById('btn-start-benchmark');
+    const cancelBtn = document.getElementById('btn-cancel-benchmark');
+    if (startBtn) { startBtn.classList.remove('hidden'); startBtn.disabled = false; }
+    if (cancelBtn) cancelBtn.classList.add('hidden');
+
+    const statusBadge = document.getElementById('benchmark-status-badge');
+    const headerStatus = document.getElementById('benchmark-header-text');
+    const headerPill = document.getElementById('benchmark-header-status');
+    const stageLabel = document.getElementById('benchmark-stage-label');
+    const bar = document.getElementById('benchmark-progress-bar');
+    const pctEl = document.getElementById('benchmark-progress-pct');
+
+    if (statusBadge) { statusBadge.textContent = 'Completed'; statusBadge.className = 'badge badge-success'; }
+    if (headerStatus) headerStatus.textContent = 'Finished';
+    if (headerPill) headerPill.className = 'status-pill idle';
+    if (stageLabel) stageLabel.textContent = `Completed in ${msg.duration_s ? msg.duration_s.toFixed(1) : ''}s`;
+    if (bar) bar.style.width = '100%';
+    if (pctEl) pctEl.textContent = '100%';
+
+    this.showToast(`Benchmark complete! ${msg.passed} working, ${msg.failed} failed.`, 'success');
+    this.refreshStatus();
+    this.loadTopNodes();
+  },
+
+  handleBenchmarkCancelled(msg) {
+    this.state.benchmarkRunning = false;
+    const startBtn = document.getElementById('btn-start-benchmark');
+    const cancelBtn = document.getElementById('btn-cancel-benchmark');
+    if (startBtn) { startBtn.classList.remove('hidden'); startBtn.disabled = false; }
+    if (cancelBtn) cancelBtn.classList.add('hidden');
+
+    const statusBadge = document.getElementById('benchmark-status-badge');
+    const headerStatus = document.getElementById('benchmark-header-text');
+    const headerPill = document.getElementById('benchmark-header-status');
+    const stageLabel = document.getElementById('benchmark-stage-label');
+
+    if (statusBadge) { statusBadge.textContent = 'Cancelled'; statusBadge.className = 'badge badge-danger'; }
+    if (headerStatus) headerStatus.textContent = 'Cancelled';
+    if (headerPill) headerPill.className = 'status-pill idle';
+    if (stageLabel) stageLabel.textContent = 'Benchmark cancelled by user';
+
+    this.showToast('Benchmark cancelled', 'info');
+  },
+
+  createNodeRowHtml(d) {
+    let latClass = 'latency-slow';
+    let latText = `${Math.round(d.latency_ms)} ms`;
+    if (!d.success) {
+      latClass = 'latency-failed';
+      latText = 'Timeout';
+    } else if (d.latency_ms < 500) {
+      latClass = 'latency-fast';
+    } else if (d.latency_ms < 1500) {
+      latClass = 'latency-medium';
+    }
+
+    const protoClass = `badge-${(d.protocol || '').toLowerCase()}`;
+    const statusBadge = d.success 
+      ? `<span class="badge badge-success">Passed</span>` 
+      : `<span class="badge badge-danger" title="${this.escapeHtml(d.error || '')}">Fail (${this.escapeHtml(d.stage || '')})</span>`;
+
+    const actionBtn = d.success
+      ? `<button class="btn btn-primary btn-xs" onclick="app.connectProxy('${d.config_id}')">Connect</button>`
+      : `<span class="text-muted text-xs">—</span>`;
+
+    return `
+      <tr>
+        <td>${statusBadge}</td>
+        <td><span class="badge ${protoClass}">${this.escapeHtml((d.protocol || '').toUpperCase())}</span></td>
+        <td>
+          <div class="node-name-cell" title="${this.escapeHtml(d.name || d.address)}">${this.escapeHtml(d.name || d.address)}</div>
+        </td>
+        <td><span class="text-mono text-xs text-muted">${this.escapeHtml(d.address)}:${d.port}</span></td>
+        <td><span class="latency-badge ${latClass}">${latText}</span></td>
+        <td><span class="text-xs text-muted" title="${this.escapeHtml(d.error || '')}">${this.escapeHtml(d.error ? (d.error.length > 25 ? d.error.substring(0, 25) + '...' : d.error) : d.stage)}</span></td>
+        <td>${actionBtn}</td>
+      </tr>
+    `;
+  },
+
   async startBenchmark() {
+    if (this.state.benchmarkRunning) return;
+
     const target = document.getElementById('benchmark-target-input')?.value.trim() || 'https://www.google.com/generate_204';
-    const limit = parseInt(document.getElementById('benchmark-limit-input')?.value || '50', 10);
+    const threads = parseInt(document.getElementById('benchmark-threads-input')?.value || '100', 10);
+    const scope = document.getElementById('benchmark-scope-select')?.value || 'all';
     const proto = document.getElementById('benchmark-proto-select')?.value || '';
 
-    const box = document.getElementById('benchmark-status-box');
     const startBtn = document.getElementById('btn-start-benchmark');
-    if (startBtn) startBtn.disabled = true;
+    const cancelBtn = document.getElementById('btn-cancel-benchmark');
 
-    if (box) {
-      box.innerHTML = `
-        <div class="text-center py-5">
-          <div class="empty-icon rotating">⚡</div>
-          <p class="font-bold text-lg mb-1">Benchmarking ${limit} configs</p>
-          <p class="text-mono text-sm text-cyan mb-2">${this.escapeHtml(target)}</p>
-          <p class="text-muted text-xs">Stage 0 (DNS+TCP) → Stage 1 (TLS) → Stage 2 (Proxy In-Process Real Delay)...</p>
-          <div class="benchmark-progress-bar mt-3"><div class="benchmark-progress-inner"></div></div>
-        </div>
-      `;
-    }
+    if (startBtn) startBtn.disabled = true;
 
     try {
       const res = await fetch('/api/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target: target, limit: limit, protocol: proto })
+        body: JSON.stringify({ target: target, threads: threads, protocol: proto, scope: scope })
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Benchmark failed');
+      if (!res.ok) throw new Error(data.error || 'Failed to start benchmark');
 
-      if (box) {
-        const passRate = data.total > 0 ? Math.round((data.passed / data.total) * 100) : 0;
-        let detailsHtml = '';
-
-        if (data.details && data.details.length > 0) {
-          detailsHtml = `
-            <div class="benchmark-table-wrap mt-4">
-              <div class="benchmark-table-header">
-                <span class="font-bold text-sm">Tested Configs Real Delay (${data.details.length})</span>
-                <span class="text-muted text-xs">Sorted by fastest latency</span>
-              </div>
-              <div class="table-responsive" style="max-height: 380px; overflow-y: auto;">
-                <table class="data-table">
-                  <thead>
-                    <tr>
-                      <th>#</th>
-                      <th>Proto</th>
-                      <th>Name / Server</th>
-                      <th>Real Delay</th>
-                      <th>Status</th>
-                      <th>Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${data.details.map((d, i) => {
-                      let latClass = 'latency-slow';
-                      let latText = `${Math.round(d.latency_ms)} ms`;
-                      if (!d.success) {
-                        latClass = 'latency-failed';
-                        latText = 'Timeout';
-                      } else if (d.latency_ms < 500) {
-                        latClass = 'latency-fast';
-                      } else if (d.latency_ms < 1500) {
-                        latClass = 'latency-medium';
-                      }
-
-                      const protoClass = `badge-${d.protocol.toLowerCase()}`;
-                      const statusBadge = d.success 
-                        ? `<span class="badge badge-success">Passed</span>` 
-                        : `<span class="badge badge-danger" title="${this.escapeHtml(d.error || '')}">Fail (${this.escapeHtml(d.stage)})</span>`;
-
-                      const actionBtn = d.success
-                        ? `<button class="btn btn-primary btn-xs" onclick="app.connectProxy('${d.config_id}')">Connect</button>`
-                        : `<span class="text-muted text-xs">—</span>`;
-
-                      return `
-                        <tr>
-                          <td class="text-muted text-xs">${i + 1}</td>
-                          <td><span class="badge ${protoClass}">${this.escapeHtml(d.protocol.toUpperCase())}</span></td>
-                          <td>
-                            <div class="node-name-cell" title="${this.escapeHtml(d.name)}">${this.escapeHtml(d.name)}</div>
-                            <div class="text-muted text-xs">${this.escapeHtml(d.address)}:${d.port}</div>
-                          </td>
-                          <td><span class="latency-badge ${latClass}">${latText}</span></td>
-                          <td>${statusBadge}</td>
-                          <td>${actionBtn}</td>
-                        </tr>
-                      `;
-                    }).join('')}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          `;
-        }
-
-        box.innerHTML = `
-          <div class="result-card">
-            <div class="result-header">
-              <span class="font-bold text-success">✅ Benchmark Finished</span>
-              <span class="badge badge-vless">${data.passed}/${data.total} Passed (${passRate}%)</span>
-            </div>
-            <div class="result-grid">
-              <div class="result-metric">
-                <div class="result-metric-label">Tested Configs</div>
-                <div class="result-metric-val">${data.total}</div>
-              </div>
-              <div class="result-metric">
-                <div class="result-metric-label">Working Nodes</div>
-                <div class="result-metric-val" style="color: var(--accent-emerald);">${data.passed}</div>
-              </div>
-              <div class="result-metric">
-                <div class="result-metric-label">Fastest Real Delay</div>
-                <div class="result-metric-val" style="color: var(--accent-cyan);">${data.fastest_ms ? Math.round(data.fastest_ms) + ' ms' : '—'}</div>
-              </div>
-              <div class="result-metric">
-                <div class="result-metric-label">Target URL</div>
-                <div class="result-metric-val text-xs text-muted" style="word-break: break-all;">${this.escapeHtml(data.target || target)}</div>
-              </div>
-            </div>
-            ${detailsHtml}
-          </div>
-        `;
-      }
-
-      this.showToast(`Benchmark complete! ${data.passed} of ${data.total} passed.`, 'success');
-      this.refreshStatus();
-      this.loadTopNodes();
+      this.showToast(`Benchmark launched on ${data.total} configs (${data.threads} threads)`, 'info');
+      if (startBtn) startBtn.classList.add('hidden');
+      if (cancelBtn) cancelBtn.classList.remove('hidden');
     } catch (e) {
-      if (box) {
-        box.innerHTML = `<div class="text-center text-danger py-4"><p>❌ Error: ${e.message}</p></div>`;
-      }
       this.showToast(e.message, 'error');
-    } finally {
       if (startBtn) startBtn.disabled = false;
+    }
+  },
+
+  async cancelBenchmark() {
+    try {
+      const res = await fetch('/api/test/cancel', { method: 'POST' });
+      const data = await res.json();
+      this.showToast('Benchmark cancelled', 'info');
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  appendLog(entry) {
+    this.state.logs.push(entry);
+    if (this.state.logs.length > 500) {
+      this.state.logs.shift();
+    }
+
+    const container = document.getElementById('operation-logs-container');
+    if (!container) return;
+
+    if (this.state.activeLogLevel !== 'all' && entry.level !== this.state.activeLogLevel) {
+      return;
+    }
+
+    const line = document.createElement('div');
+    line.className = 'terminal-line';
+    line.innerHTML = `
+      <span class="terminal-ts">[${this.escapeHtml(entry.timestamp)}]</span>
+      <span class="terminal-source ${this.escapeHtml(entry.source)}">[${this.escapeHtml(entry.source)}]</span>
+      <span class="terminal-msg ${this.escapeHtml(entry.level)}">${this.escapeHtml(entry.message)}</span>
+    `;
+
+    container.appendChild(line);
+
+    if (this.state.autoScrollLogs) {
+      container.scrollTop = container.scrollHeight;
+    }
+  },
+
+  renderLogs() {
+    const container = document.getElementById('operation-logs-container');
+    if (!container) return;
+
+    const filtered = this.state.activeLogLevel === 'all'
+      ? this.state.logs
+      : this.state.logs.filter(l => l.level === this.state.activeLogLevel);
+
+    if (filtered.length === 0) {
+      container.innerHTML = '<div class="terminal-line text-muted">[System] No log entries for current filter level.</div>';
+      return;
+    }
+
+    container.innerHTML = filtered.map(entry => `
+      <div class="terminal-line">
+        <span class="terminal-ts">[${this.escapeHtml(entry.timestamp)}]</span>
+        <span class="terminal-source ${this.escapeHtml(entry.source)}">[${this.escapeHtml(entry.source)}]</span>
+        <span class="terminal-msg ${this.escapeHtml(entry.level)}">${this.escapeHtml(entry.message)}</span>
+      </div>
+    `).join('');
+
+    if (this.state.autoScrollLogs) {
+      container.scrollTop = container.scrollHeight;
+    }
+  },
+
+  clearLogs() {
+    this.state.logs = [];
+    const container = document.getElementById('operation-logs-container');
+    if (container) {
+      container.innerHTML = '<div class="terminal-line text-muted">[System] Console output cleared by user.</div>';
     }
   },
 

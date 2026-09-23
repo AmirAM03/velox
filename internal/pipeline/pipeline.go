@@ -19,13 +19,17 @@ import (
 	"github.com/AmirAM03/velox/internal/model"
 )
 
+// ProgressCallback is called when a config finishes a test in any stage.
+type ProgressCallback func(stage model.TestStage, current, total, passed, failed int, result *model.TestResult, cfg *model.ProxyConfig)
+
 // Pipeline orchestrates multi-stage testing of proxy configs.
 type Pipeline struct {
-	cfg    *config.PipelineConfig
-	engine engine.Engine
-	targets []string       // Target URLs for Stage 2
-	expect  []int          // Expected HTTP status codes
-	logger  *slog.Logger
+	cfg        *config.PipelineConfig
+	engine     engine.Engine
+	targets    []string // Target URLs for Stage 2
+	expect     []int    // Expected HTTP status codes
+	logger     *slog.Logger
+	onProgress ProgressCallback
 }
 
 // New creates a new Pipeline.
@@ -33,13 +37,39 @@ func New(cfg *config.PipelineConfig, eng engine.Engine, targets []string, expect
 	if logger == nil {
 		logger = slog.Default()
 	}
+	cfgCopy := *cfg
+	// Ensure resilient default timeouts for real-world proxy testing
+	if cfgCopy.Stage0Timeout < 2500*time.Millisecond {
+		cfgCopy.Stage0Timeout = 2500 * time.Millisecond
+	}
+	if cfgCopy.Stage1Timeout < 3500*time.Millisecond {
+		cfgCopy.Stage1Timeout = 3500 * time.Millisecond
+	}
+	if cfgCopy.Stage2Timeout < 6000*time.Millisecond {
+		cfgCopy.Stage2Timeout = 7000 * time.Millisecond
+	}
 	return &Pipeline{
-		cfg:     cfg,
+		cfg:     &cfgCopy,
 		engine:  eng,
 		targets: targets,
 		expect:  expect,
 		logger:  logger,
 	}
+}
+
+// SetOnProgress registers a callback for live per-node test updates.
+func (p *Pipeline) SetOnProgress(cb ProgressCallback) {
+	p.onProgress = cb
+}
+
+// SetConcurrency dynamically scales worker pools across all pipeline stages.
+func (p *Pipeline) SetConcurrency(threads int) {
+	if threads <= 0 {
+		return
+	}
+	p.cfg.Stage0Workers = threads * 4
+	p.cfg.Stage1Workers = threads * 2
+	p.cfg.Stage2Workers = threads
 }
 
 // Result holds the outcome of running a config through the pipeline.
@@ -156,13 +186,16 @@ func (p *Pipeline) runStage(
 
 	// Collect results
 	var survivors []*model.ProxyConfig
+	var stagePassed, stageFailed int
 	for sr := range resultCh {
 		idx := idxMap[sr.config.ID]
 		allResults[idx].Results = append(allResults[idx].Results, sr.result)
 
 		if sr.result.Success {
+			stagePassed++
 			survivors = append(survivors, sr.config)
 		} else {
+			stageFailed++
 			allResults[idx].Failed = true
 			allResults[idx].FailedStage = stage
 			p.logger.Debug("config failed",
@@ -171,15 +204,44 @@ func (p *Pipeline) runStage(
 				"error", sr.result.Error,
 			)
 		}
+
+		if p.onProgress != nil {
+			p.onProgress(stage, stagePassed+stageFailed, len(configs), stagePassed, stageFailed, &sr.result, sr.config)
+		}
 	}
 
 	return survivors
 }
 
-// testDNSTCP performs Stage 0: DNS resolution and TCP connect.
+// testDNSTCP performs Stage 0: DNS resolution and TCP/UDP connect.
 func (p *Pipeline) testDNSTCP(ctx context.Context, cfg *model.ProxyConfig) model.TestResult {
 	start := time.Now()
 	addr := fmt.Sprintf("%s:%d", cfg.Address, cfg.Port)
+
+	if cfg.Network == model.NetworkUDP {
+		raddr, err := net.ResolveUDPAddr("udp", addr)
+		if err != nil {
+			return model.TestResult{
+				Success: false,
+				Error:   fmt.Sprintf("udp resolve: %v", err),
+				Latency: time.Since(start),
+			}
+		}
+		conn, err := net.DialUDP("udp", nil, raddr)
+		latency := time.Since(start)
+		if err != nil {
+			return model.TestResult{
+				Success: false,
+				Error:   fmt.Sprintf("udp dial: %v", err),
+				Latency: latency,
+			}
+		}
+		conn.Close()
+		return model.TestResult{
+			Success: true,
+			Latency: latency,
+		}
+	}
 
 	// TCP dial includes DNS resolution
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
@@ -204,8 +266,8 @@ func (p *Pipeline) testDNSTCP(ctx context.Context, cfg *model.ProxyConfig) model
 func (p *Pipeline) testTLS(ctx context.Context, cfg *model.ProxyConfig) model.TestResult {
 	start := time.Now()
 
-	// Skip TLS test for non-TLS configs
-	if cfg.Security == model.SecurityNone {
+	// Skip TLS test for non-TLS configs (only test explicit TLS and REALITY)
+	if cfg.Security != model.SecurityTLS && cfg.Security != model.SecurityREALITY {
 		return model.TestResult{
 			Success: true,
 			Latency: time.Since(start),

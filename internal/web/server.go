@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os/exec"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,9 +19,7 @@ import (
 	"github.com/AmirAM03/velox/internal/ingest"
 	"github.com/AmirAM03/velox/internal/model"
 	"github.com/AmirAM03/velox/internal/parser"
-	"github.com/AmirAM03/velox/internal/pipeline"
 	"github.com/AmirAM03/velox/internal/proxy"
-	"github.com/AmirAM03/velox/internal/scorer"
 	"github.com/AmirAM03/velox/internal/storage"
 	"github.com/AmirAM03/velox/internal/system"
 )
@@ -33,6 +30,7 @@ type Server struct {
 	store  *storage.Store
 	logger *slog.Logger
 	port   int
+	jobMgr *BenchmarkJobManager
 
 	mu             sync.Mutex
 	proxyEngine    engine.Engine
@@ -51,11 +49,14 @@ func NewServer(cfg *config.Config, store *storage.Store, port int, logger *slog.
 		logger = slog.Default()
 	}
 
+	jobMgr := NewBenchmarkJobManager(store, &cfg.Pipeline, cfg.Scoring, logger)
+
 	return &Server{
 		cfg:    cfg,
 		store:  store,
 		logger: logger,
 		port:   port,
+		jobMgr: jobMgr,
 	}
 }
 
@@ -90,6 +91,8 @@ func (s *Server) Start(ctx context.Context, openBrowser bool) error {
 	mux.HandleFunc("/api/configs", s.handleConfigs)
 	mux.HandleFunc("/api/parse", s.handleParse)
 	mux.HandleFunc("/api/test", s.handleTest)
+	mux.HandleFunc("/api/test/stream", s.handleTestStream)
+	mux.HandleFunc("/api/test/cancel", s.handleTestCancel)
 	mux.HandleFunc("/api/connect", s.handleConnect)
 	mux.HandleFunc("/api/disconnect", s.handleDisconnect)
 	mux.HandleFunc("/api/system-proxy", s.handleSystemProxy)
@@ -268,14 +271,18 @@ func (s *Server) handleParse(w http.ResponseWriter, r *http.Request) {
 
 	var allRaw []string
 	for _, u := range req.URLs {
+		s.jobMgr.Log("info", "ingest", fmt.Sprintf("Fetching subscription: %s", u))
 		raw, err := ingest.FetchSubscription(u, 0)
 		if err != nil {
 			s.logger.Error("web ingest: failed fetch", "url", u, "error", err)
+			s.jobMgr.Log("error", "ingest", fmt.Sprintf("Failed to fetch %s: %v", u, err))
 			continue
 		}
+		s.jobMgr.Log("success", "ingest", fmt.Sprintf("Successfully retrieved payload from %s (%d bytes)", u, len(raw)))
 		allRaw = append(allRaw, raw)
 	}
 	if req.Raw != "" {
+		s.jobMgr.Log("info", "ingest", fmt.Sprintf("Processing manual text input (%d bytes)", len(req.Raw)))
 		allRaw = append(allRaw, req.Raw)
 	}
 
@@ -286,12 +293,16 @@ func (s *Server) handleParse(w http.ResponseWriter, r *http.Request) {
 	for _, cfg := range configs {
 		cfg.Source = "web-ui"
 	}
+	s.jobMgr.Log("info", "ingest", fmt.Sprintf("Parsed %d configurations (%d duplicates discarded, %d invalid lines skipped)", len(configs), batchDups, failures))
 
 	inserted, updated, err := s.store.UpsertConfigs(configs)
 	if err != nil {
+		s.jobMgr.Log("error", "ingest", fmt.Sprintf("Database upsert failed: %v", err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	s.jobMgr.Log("success", "ingest", fmt.Sprintf("Database updated: %d new inserted, %d existing refreshed", inserted, updated))
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"parsed":           len(configs),
@@ -302,7 +313,7 @@ func (s *Server) handleParse(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// API: Test / Benchmark
+// API: Test / Benchmark (Starts asynchronous test runner)
 func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -311,8 +322,9 @@ func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Target   string `json:"target"`
-		Limit    int    `json:"limit"`
+		Threads  int    `json:"threads"`
 		Protocol string `json:"protocol"`
+		Scope    string `json:"scope"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -326,121 +338,102 @@ func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(req.Target, "http://") && !strings.HasPrefix(req.Target, "https://") {
 		req.Target = "https://" + req.Target
 	}
-	if req.Limit <= 0 {
-		req.Limit = 50
+	if req.Threads <= 0 {
+		req.Threads = 100
+	} else if req.Threads > 1000 {
+		req.Threads = 1000
+	}
+
+	protoFilter := ""
+	if req.Protocol != "" && req.Protocol != "all" {
+		protoFilter = strings.ToLower(req.Protocol)
 	}
 
 	var configs []*model.ProxyConfig
 	var err error
-	if req.Protocol != "" && req.Protocol != "all" {
-		configs, err = s.store.ListConfigsFiltered(strings.ToLower(req.Protocol), req.Limit)
-	} else {
-		configs, err = s.store.ListConfigs(req.Limit)
+
+	switch req.Scope {
+	case "untested":
+		configs, err = s.store.ListConfigsUntested(protoFilter, 0)
+	case "top100":
+		configs, err = s.store.ListConfigsFiltered(protoFilter, 100)
+	case "top500":
+		configs, err = s.store.ListConfigsFiltered(protoFilter, 500)
+	default:
+		// "all" or empty: benchmark all matching configs in database
+		configs, err = s.store.ListConfigsFiltered(protoFilter, 0)
 	}
+
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	if len(configs) == 0 {
-		writeError(w, http.StatusBadRequest, "no configurations to test")
+		writeError(w, http.StatusBadRequest, "no configurations match selection to test")
 		return
 	}
 
-	eng := engine.NewXrayEngine(s.logger)
-	defer eng.Close()
-
-	targets := []string{req.Target}
-	p := pipeline.New(&s.cfg.Pipeline, eng, targets, s.cfg.Targets.ExpectStatus, s.logger)
-	results := p.Run(context.Background(), configs)
-
-	sc := scorer.New(s.cfg.Scoring)
-	passed := 0
-	var fastestMS float64
-
-	type TestDetail struct {
-		ConfigID  string  `json:"config_id"`
-		Name      string  `json:"name"`
-		Protocol  string  `json:"protocol"`
-		Address   string  `json:"address"`
-		Port      int     `json:"port"`
-		Success   bool    `json:"success"`
-		LatencyMS float64 `json:"latency_ms"`
-		Stage     string  `json:"stage"`
-		Error     string  `json:"error,omitempty"`
+	if err := s.jobMgr.Start(req.Target, req.Threads, configs); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
 	}
-
-	var details []TestDetail
-
-	for _, r := range results {
-		var nodeLatency float64
-		var lastErr string
-		var lastStage = "passed"
-
-		if !r.Failed {
-			passed++
-			for _, tr := range r.Results {
-				if tr.Success && tr.Stage == model.StageProxy {
-					latMS := float64(tr.Latency.Milliseconds())
-					nodeLatency = latMS
-					if fastestMS == 0 || (latMS > 0 && latMS < fastestMS) {
-						fastestMS = latMS
-					}
-				}
-			}
-		} else {
-			lastStage = r.FailedStage.String()
-			for _, tr := range r.Results {
-				if !tr.Success {
-					lastErr = tr.Error
-				}
-			}
-		}
-
-		if err := s.store.InsertTestResults(r.Results); err != nil {
-			s.logger.Warn("failed to store test results", "error", err)
-		}
-		existing, _ := s.store.GetScore(r.Config.ID)
-		score := sc.Compute(r.Config.ID, r.Results, existing)
-		_ = s.store.UpsertScore(score)
-
-		name := r.Config.DisplayName()
-		if name == "" {
-			name = r.Config.Address
-		}
-
-		details = append(details, TestDetail{
-			ConfigID:  r.Config.ID,
-			Name:      name,
-			Protocol:  string(r.Config.Protocol),
-			Address:   r.Config.Address,
-			Port:      r.Config.Port,
-			Success:   !r.Failed,
-			LatencyMS: nodeLatency,
-			Stage:     lastStage,
-			Error:     lastErr,
-		})
-	}
-
-	// Sort details: working nodes first by latency ascending, then failures
-	sort.Slice(details, func(i, j int) bool {
-		if details[i].Success != details[j].Success {
-			return details[i].Success
-		}
-		if details[i].Success && details[j].Success {
-			return details[i].LatencyMS < details[j].LatencyMS
-		}
-		return false
-	})
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"total":      len(configs),
-		"passed":     passed,
-		"failed":     len(configs) - passed,
-		"fastest_ms": fastestMS,
-		"target":     req.Target,
-		"details":    details,
+		"status":   "started",
+		"target":   req.Target,
+		"threads":  req.Threads,
+		"total":    len(configs),
+		"protocol": req.Protocol,
+		"scope":    req.Scope,
 	})
+}
+
+// API: Test Stream (Server-Sent Events)
+func (s *Server) handleTestStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	ch := s.jobMgr.Subscribe()
+	defer s.jobMgr.Unsubscribe(ch)
+
+	flusher.Flush()
+
+	notify := r.Context().Done()
+	for {
+		select {
+		case <-notify:
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			w.Write(msg)
+			flusher.Flush()
+		}
+	}
+}
+
+// API: Cancel Test
+func (s *Server) handleTestCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	if s.jobMgr.Cancel() {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+	} else {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "not_running"})
+	}
 }
 
 // API: Connect
@@ -495,9 +488,12 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		mixedPort = 1080
 	}
 
+	s.jobMgr.Log("info", "proxy", fmt.Sprintf("Activating local proxy routing via '%s' (%s:%d)", targetConfig.DisplayName(), targetConfig.Address, targetConfig.Port))
+
 	srv := proxy.NewServer(s.cfg.Proxy.ListenAddr, mixedPort, eng, sel, s.logger)
 	if err := srv.Start(); err != nil {
 		eng.Close()
+		s.jobMgr.Log("error", "proxy", fmt.Sprintf("Failed to bind proxy on %s:%d: %v", s.cfg.Proxy.ListenAddr, mixedPort, err))
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("start proxy: %v", err))
 		return
 	}
@@ -506,6 +502,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	s.proxyServer = srv
 	s.proxySelector = sel
 	s.activeConfig = targetConfig
+
+	s.jobMgr.Log("success", "proxy", fmt.Sprintf("Mixed proxy (HTTP/SOCKS5) listening on %s:%d", s.cfg.Proxy.ListenAddr, mixedPort))
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":   "connected",
@@ -524,6 +522,7 @@ func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.Close()
+	s.jobMgr.Log("info", "proxy", "Local proxy disconnected and shut down")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
@@ -553,16 +552,20 @@ func (s *Server) handleSystemProxy(w http.ResponseWriter, r *http.Request) {
 	sysProxy := system.NewProxyController(s.logger)
 	if req.Enabled {
 		if err := sysProxy.Enable(s.cfg.Proxy.ListenAddr, port, port); err != nil {
+			s.jobMgr.Log("error", "system", fmt.Sprintf("Failed to enable system proxy: %v", err))
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("set system proxy: %v", err))
 			return
 		}
 		s.sysProxyActive = true
+		s.jobMgr.Log("success", "system", fmt.Sprintf("OS system proxy redirected to %s:%d", s.cfg.Proxy.ListenAddr, port))
 	} else {
 		if err := sysProxy.Disable(); err != nil {
+			s.jobMgr.Log("error", "system", fmt.Sprintf("Failed to disable system proxy: %v", err))
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("clear system proxy: %v", err))
 			return
 		}
 		s.sysProxyActive = false
+		s.jobMgr.Log("info", "system", "OS system proxy cleared and disabled")
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -577,11 +580,15 @@ func (s *Server) handleDedup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.jobMgr.Log("info", "dedup", "Starting database deduplication pass across stored configurations...")
 	scanned, removed, err := s.store.Deduplicate()
 	if err != nil {
+		s.jobMgr.Log("error", "dedup", fmt.Sprintf("Deduplication error: %v", err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	s.jobMgr.Log("success", "dedup", fmt.Sprintf("Deduplication complete: %d records scanned, %d duplicates removed", scanned, removed))
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"scanned": scanned,

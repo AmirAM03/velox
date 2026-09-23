@@ -396,6 +396,9 @@ func (s *Store) UpsertScore(score *model.Score) error {
 
 // ListConfigsFiltered returns configs ordered by score, optionally filtered by protocol.
 func (s *Store) ListConfigsFiltered(protocol string, limit int) ([]*model.ProxyConfig, error) {
+	if limit <= 0 {
+		limit = -1
+	}
 	var query string
 	var args []interface{}
 
@@ -415,6 +418,55 @@ func (s *Store) ListConfigsFiltered(protocol string, limit int) ([]*model.ProxyC
 			FROM configs c
 			LEFT JOIN scores s ON c.id = s.config_id
 			ORDER BY COALESCE(s.composite, 999999) ASC
+			LIMIT ?
+		`
+		args = []interface{}{limit}
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var configs []*model.ProxyConfig
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			continue
+		}
+		var cfg model.ProxyConfig
+		if err := json.Unmarshal([]byte(data), &cfg); err != nil {
+			continue
+		}
+		configs = append(configs, &cfg)
+	}
+	return configs, rows.Err()
+}
+
+// ListConfigsUntested returns configs that have never been tested (no score entry yet).
+func (s *Store) ListConfigsUntested(protocol string, limit int) ([]*model.ProxyConfig, error) {
+	if limit <= 0 {
+		limit = -1
+	}
+	var query string
+	var args []interface{}
+
+	if protocol != "" {
+		query = `
+			SELECT c.data
+			FROM configs c
+			LEFT JOIN scores s ON c.id = s.config_id
+			WHERE s.config_id IS NULL AND c.protocol = ?
+			LIMIT ?
+		`
+		args = []interface{}{protocol, limit}
+	} else {
+		query = `
+			SELECT c.data
+			FROM configs c
+			LEFT JOIN scores s ON c.id = s.config_id
+			WHERE s.config_id IS NULL
 			LIMIT ?
 		`
 		args = []interface{}{limit}

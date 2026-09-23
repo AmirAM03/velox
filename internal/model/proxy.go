@@ -33,6 +33,7 @@ const (
 	NetworkHTTPUpgrade Network = "httpupgrade"
 	NetworkKCP        Network = "kcp"
 	NetworkQUIC       Network = "quic"
+	NetworkUDP        Network = "udp"
 	NetworkMeek       Network = "meek"
 	NetworkSplitHTTP  Network = "splithttp"
 )
