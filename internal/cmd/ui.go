@@ -3,11 +3,14 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
+	loggerPkg "github.com/AmirAM03/velox/internal/logger"
 	"github.com/AmirAM03/velox/internal/storage"
 	"github.com/AmirAM03/velox/internal/web"
 )
@@ -27,17 +30,13 @@ func newUICmd() *cobra.Command {
   - Subscription fetching and manual copy-paste with automatic deduplication
   - 3-stage latency benchmarks against custom target URLs
   - One-click proxy connection, system proxy control, and database maintenance
-
-Examples:
-  velox ui
-  velox dashboard
-  velox ui --port 18080 --no-open`,
+  - In-depth application logs with search, level filters, retention policies, and export`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runUI(cmd.Context(), port, !noOpen)
 		},
 	}
 
-	cmd.Flags().IntVarP(&port, "port", "P", 18080, "web dashboard port")
+	cmd.Flags().IntVarP(&port, "port", "p", 18080, "web dashboard port")
 	cmd.Flags().BoolVar(&noOpen, "no-open", false, "do not automatically open the browser")
 
 	return cmd
@@ -50,7 +49,23 @@ func runUI(ctx context.Context, port int, openBrowser bool) error {
 	}
 	defer store.Close()
 
-	srv := web.NewServer(appCfg, store, port, logger)
+	// Initialize DB logging handler to persist all slog events to SQLite
+	lvl := parseLogLevel(appCfg.LogLevel)
+	dbHandler := loggerPkg.NewDBHandler(loggerPkg.Config{
+		Store:      store,
+		Level:      lvl,
+		JSONFormat: appCfg.LogJSON,
+	})
+	defer dbHandler.Close()
+
+	appLogger := slog.New(dbHandler)
+	slog.SetDefault(appLogger)
+	logger = appLogger
+
+	// Start background log retention pruner
+	loggerPkg.StartPruner(ctx, store, appLogger, 1*time.Hour)
+
+	srv := web.NewServer(appCfg, store, port, appLogger, dbHandler)
 
 	// Listen for termination signals
 	sigCtx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)

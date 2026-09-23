@@ -17,7 +17,7 @@
         <div class="brand-logo">⚡</div>
         <div class="brand-text">
           <span class="brand-title">VELOX</span>
-          <span class="brand-badge">v0.1.6</span>
+          <span class="brand-badge">v0.1.7</span>
         </div>
       </div>
 
@@ -26,8 +26,8 @@
         <button class="nav-btn" data-tab="configs">Configs</button>
         <button class="nav-btn" data-tab="ingest">Ingest & Parse</button>
         <button class="nav-btn" data-tab="benchmark">Benchmark</button>
+        <button class="nav-btn" data-tab="logs">Application Logs</button>
         <button class="nav-btn" data-tab="tools">Database Tools</button>
-        <button class="nav-btn" data-tab="console">Live Console</button>
       </nav>
 
       <div class="nav-status-group">
@@ -434,37 +434,137 @@
         </div>
       </section>
 
-      <!-- 6. LIVE ENGINE CONSOLE VIEW -->
-      <section id="tab-console" class="tab-pane">
+      <!-- 6. IN-DEPTH APPLICATION LOGS VIEW -->
+      <section id="tab-logs" class="tab-pane">
         <div class="dashboard-header">
           <div>
-            <h1 class="page-title">Live Engine Operations Console</h1>
-            <p class="page-subtitle">Real-time verbosity stream tracking Ingestion, Benchmarks, Routing, and System Proxy</p>
+            <h1 class="page-title">Application Logs & Telemetry</h1>
+            <p class="page-subtitle">Persistent SQLite WAL logs with real-time streaming, deep attribute inspection, and configurable retention</p>
           </div>
           <div class="actions-group">
-            <label class="checkbox-label text-xs mr-3">
-              <input type="checkbox" id="console-autoscroll" checked> Auto-scroll
-            </label>
-            <button id="btn-clear-console" class="btn btn-secondary btn-sm">Clear Output</button>
+            <button id="btn-refresh-logs" class="btn btn-secondary">
+              <span class="icon">↻</span> Refresh
+            </button>
+            <button id="btn-export-logs" class="btn btn-secondary">
+              <span class="icon">⬇</span> Export JSON
+            </button>
+            <button id="btn-prune-logs" class="btn btn-secondary" title="Prune logs older than current retention">
+              <span class="icon">🧹</span> Prune Now
+            </button>
+            <button id="btn-clear-logs" class="btn btn-danger btn-sm" title="Delete all logs and reclaim space">
+              <span class="icon">🗑</span> Clear All
+            </button>
           </div>
         </div>
 
-        <div class="glass-card console-card">
-          <div class="console-filter-bar mb-2">
-            <div class="filter-chips">
-              <button class="console-filter-btn active" data-level="all">All Logs</button>
-              <button class="console-filter-btn" data-level="info">Info</button>
-              <button class="console-filter-btn" data-level="success">Success</button>
-              <button class="console-filter-btn" data-level="warn">Warnings</button>
-              <button class="console-filter-btn" data-level="error">Errors</button>
+        <!-- Logs Overview & Retention Configuration Grid -->
+        <div class="logs-stats-grid mb-4">
+          <div class="glass-card stat-metric-box">
+            <div class="metric-title">Total Records</div>
+            <div id="log-stat-total" class="metric-value text-cyan">0</div>
+            <div id="log-stat-db-size" class="text-xs text-muted">DB Size: —</div>
+          </div>
+          <div class="glass-card stat-metric-box">
+            <div class="metric-title">Errors</div>
+            <div id="log-stat-errors" class="metric-value text-rose">0</div>
+            <div id="log-stat-error-rate" class="text-xs text-muted">0% Error Rate</div>
+          </div>
+          <div class="glass-card stat-metric-box">
+            <div class="metric-title">Warnings</div>
+            <div id="log-stat-warns" class="metric-value text-amber">0</div>
+            <div class="text-xs text-muted">Handled Warnings</div>
+          </div>
+          <div class="glass-card retention-config-box">
+            <div class="retention-header">
+              <div>
+                <div class="metric-title">Log Retention Policy</div>
+                <p class="text-xs text-muted">Automatic background pruning window</p>
+              </div>
+              <span id="retention-badge" class="badge badge-primary">7 Days</span>
             </div>
-            <div class="console-status">
-              <span id="console-stream-status" class="text-xs text-emerald">● Live SSE Connected</span>
+            <div class="retention-form mt-2">
+              <select id="log-retention-select" class="form-input text-xs" style="max-width: 140px;">
+                <option value="24h">24 Hours (1 Day)</option>
+                <option value="3d">3 Days</option>
+                <option value="7d" selected>7 Days (1 Week)</option>
+                <option value="30d">30 Days (1 Month)</option>
+                <option value="90d">90 Days (3 Months)</option>
+                <option value="365d">1 Year</option>
+              </select>
+              <button id="btn-save-retention" class="btn btn-primary btn-xs">Save Policy</button>
             </div>
           </div>
+        </div>
 
-          <div id="operation-logs-container" class="terminal-box">
-            <div class="terminal-line text-muted">[System] Velox Web Dashboard logging initialized. All engine events will stream here live.</div>
+        <!-- Filtering & Controls Bar -->
+        <div class="glass-card mb-4 p-3">
+          <div class="logs-toolbar">
+            <!-- Search bar -->
+            <div class="search-input-wrap" style="flex: 1; min-width: 240px;">
+              <span class="search-icon">🔍</span>
+              <input type="text" id="logs-search-input" class="search-input" placeholder="Search message or attributes (e.g. timeout, IP, protocol)...">
+            </div>
+
+            <!-- Level Filters -->
+            <div class="filter-chips">
+              <button class="log-filter-chip active" data-level="all">All</button>
+              <button class="log-filter-chip chip-error" data-level="ERROR">Errors</button>
+              <button class="log-filter-chip chip-warn" data-level="WARN">Warnings</button>
+              <button class="log-filter-chip chip-info" data-level="INFO">Info</button>
+              <button class="log-filter-chip chip-debug" data-level="DEBUG">Debug</button>
+            </div>
+
+            <!-- Subsystem / Source Selector -->
+            <div class="source-select-wrap">
+              <select id="logs-source-select" class="form-input text-xs" style="padding: 0.35rem 0.6rem;">
+                <option value="all">All Subsystems</option>
+                <option value="engine">Engine</option>
+                <option value="pipeline">Pipeline</option>
+                <option value="proxy">Proxy</option>
+                <option value="ingest">Ingest</option>
+                <option value="storage">Storage</option>
+                <option value="web">Web Server</option>
+                <option value="system">System</option>
+                <option value="dedup">Deduplication</option>
+              </select>
+            </div>
+
+            <!-- Live stream toggle -->
+            <div class="live-stream-toggle">
+              <label class="checkbox-label text-xs">
+                <input type="checkbox" id="toggle-live-logs" checked>
+                <span id="live-logs-status" class="text-emerald">● Live Stream</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Logs Table Card -->
+        <div class="glass-card">
+          <div class="table-responsive">
+            <table class="table logs-table">
+              <thead>
+                <tr>
+                  <th style="width: 170px;">Timestamp</th>
+                  <th style="width: 90px;">Level</th>
+                  <th style="width: 110px;">Subsystem</th>
+                  <th>Message</th>
+                  <th style="width: 140px;">Attributes</th>
+                </tr>
+              </thead>
+              <tbody id="logs-table-tbody">
+                <tr><td colspan="5" class="text-center py-4 text-muted">Loading application logs...</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Logs Pagination Bar -->
+          <div class="pagination-bar">
+            <span id="logs-pagination-info" class="pagination-info">Showing 0-0 of 0 logs</span>
+            <div class="pagination-actions">
+              <button id="btn-logs-prev" class="btn btn-secondary btn-sm" disabled>← Previous</button>
+              <button id="btn-logs-next" class="btn btn-secondary btn-sm" disabled>Next →</button>
+            </div>
           </div>
         </div>
       </section>

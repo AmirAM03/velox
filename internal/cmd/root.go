@@ -1,4 +1,5 @@
-// Package cmd implements the Cobra CLI commands for Velox.
+// Package cmd implements the command-line interface for Velox.
+// Velox runs as a dedicated high-performance Web Dashboard by default.
 package cmd
 
 import (
@@ -21,41 +22,36 @@ var (
 
 // NewRootCmd creates the root Cobra command.
 func NewRootCmd() *cobra.Command {
+	var (
+		port   int
+		noOpen bool
+	)
+
 	rootCmd := &cobra.Command{
 		Use:   "velox",
-		Short: "Velox — high-performance V2Ray proxy config engine",
-		Long: `Velox parses, tests, scores, and connects through proxy configurations
-at high speed. It supports VMess, VLESS, Trojan, Shadowsocks, and more.
+		Short: "Velox — high-performance V2Ray proxy engine & web dashboard",
+		Long: `Velox provides an interactive, full-featured web dashboard for managing,
+parsing, testing, scoring, connecting, and deep-logging V2Ray proxy configurations.
 
-Parse configs from subscription URLs or manual input, test them against
-your custom target URLs, and connect through the fastest working proxy.`,
+Running velox launches the local Web Dashboard directly.`,
 		PersistentPreRunE: initConfig,
 		SilenceUsage:      true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runUI(cmd.Context(), port, !noOpen)
+		},
 	}
 
-	var runDashboard bool
-	rootCmd.Flags().BoolVar(&runDashboard, "ui", false, "launch the interactive Web Dashboard")
-	rootCmd.Flags().BoolVar(&runDashboard, "dashboard", false, "launch the interactive Web Dashboard")
+	// Dashboard flags
+	rootCmd.Flags().IntVarP(&port, "port", "p", 18080, "web dashboard port")
+	rootCmd.Flags().BoolVar(&noOpen, "no-open", false, "do not automatically open the browser")
 
-	rootCmd.RunE = func(cmd *cobra.Command, args []string) error {
-		if runDashboard {
-			return runUI(cmd.Context(), 18080, true)
-		}
-		return cmd.Help()
-	}
-
-	// Persistent flags (available to all subcommands)
+	// Persistent flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ~/.velox/config.yaml or /etc/velox/config.yaml)")
 	rootCmd.PersistentFlags().String("log-level", "info", "log level (debug, info, warn, error)")
 	rootCmd.PersistentFlags().Bool("log-json", false, "output logs in JSON format")
 	rootCmd.PersistentFlags().String("data-dir", "", "data directory (default: ~/.velox or /var/lib/velox)")
 
-	// Register subcommands
-	rootCmd.AddCommand(newParseCmd())
-	rootCmd.AddCommand(newTestCmd())
-	rootCmd.AddCommand(newListCmd())
-	rootCmd.AddCommand(newConnectCmd())
-	rootCmd.AddCommand(newDedupCmd())
+	// Keep 'ui' / 'dashboard' alias subcommand
 	rootCmd.AddCommand(newUICmd())
 
 	return rootCmd
@@ -71,37 +67,30 @@ func initConfig(cmd *cobra.Command, args []string) error {
 		viper.SetConfigFile(cfgFile)
 	} else {
 		// Search paths for config file:
-		// 1. Current directory
 		viper.AddConfigPath(".")
-		// 2. User home: ~/.velox and ~/.config/velox
 		if homeDir, err := os.UserHomeDir(); err == nil && homeDir != "" {
 			viper.AddConfigPath(filepath.Join(homeDir, ".velox"))
 			viper.AddConfigPath(filepath.Join(homeDir, ".config", "velox"))
 		}
-		// 3. System-wide config on Linux: /etc/velox
 		viper.AddConfigPath("/etc/velox")
 		viper.SetConfigName("config")
 		viper.SetConfigType("yaml")
 	}
 
-	// Env vars with VELOX_ prefix
 	viper.SetEnvPrefix("VELOX")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 	viper.AutomaticEnv()
 
-	// Read config file (optional)
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			return fmt.Errorf("read config: %w", err)
 		}
 	}
 
-	// Unmarshal into config struct
 	if err := viper.Unmarshal(appCfg); err != nil {
 		return fmt.Errorf("unmarshal config: %w", err)
 	}
 
-	// Explicit CLI flags override config file and defaults
 	if cmd.Flags().Changed("data-dir") {
 		if val, err := cmd.Flags().GetString("data-dir"); err == nil && val != "" {
 			appCfg.DataDir = val
@@ -118,38 +107,23 @@ func initConfig(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Fallback to default data dir if empty
 	if appCfg.DataDir == "" {
 		appCfg.DataDir = config.DefaultDataDir()
 	}
 
-	// Ensure data directory exists
 	if err := os.MkdirAll(appCfg.DataDir, 0755); err != nil {
 		return fmt.Errorf("create data dir %q: %w", appCfg.DataDir, err)
 	}
 
-	// Initialize logger
 	logger = initLogger(appCfg.LogLevel, appCfg.LogJSON)
 	slog.SetDefault(logger)
 
 	return nil
 }
 
-// initLogger creates a structured slog.Logger.
+// initLogger creates a structured console slog.Logger.
 func initLogger(level string, jsonFormat bool) *slog.Logger {
-	var lvl slog.Level
-	switch strings.ToLower(level) {
-	case "debug":
-		lvl = slog.LevelDebug
-	case "warn":
-		lvl = slog.LevelWarn
-	case "error":
-		lvl = slog.LevelError
-	default:
-		lvl = slog.LevelInfo
-	}
-
-	opts := &slog.HandlerOptions{Level: lvl}
+	opts := &slog.HandlerOptions{Level: parseLogLevel(level)}
 
 	var handler slog.Handler
 	if jsonFormat {
@@ -159,4 +133,17 @@ func initLogger(level string, jsonFormat bool) *slog.Logger {
 	}
 
 	return slog.New(handler)
+}
+
+func parseLogLevel(level string) slog.Level {
+	switch strings.ToLower(level) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }

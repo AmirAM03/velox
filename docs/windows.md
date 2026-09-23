@@ -32,78 +32,47 @@ Remove-Item "$HOME\velox\velox.zip"
 
 ---
 
-## 2. Launching the Web Dashboard (Recommended)
+## 2. Launching the Web Dashboard
 
-Velox includes a zero-dependency, dark-mode Web Dashboard embedded directly into `velox.exe`. No web servers, Node.js, or external files are required.
+Velox is built as an interactive, web-first application with a zero-dependency, dark-mode Web Dashboard embedded directly into `velox.exe`. No web servers, Node.js, or external files are required.
 
-Open PowerShell or Command Prompt and run:
+Simply double-click `velox.exe` or run it from PowerShell:
 
 ```powershell
-velox ui
+velox.exe
 ```
-*Aliases: `velox dashboard`, `velox --ui`, or `velox --dashboard`.*
 
 The dashboard automatically starts on `http://127.0.0.1:18080` and opens your default browser (Chrome, Edge, Firefox, Brave):
-- **Overview Tab**: Live telemetry, engine status, and top ranked proxy nodes.
+- **Overview Tab**: Live telemetry, active proxy status, and top ranked proxy nodes.
 - **Configurations Tab**: Interactive searchable table across all protocols (`VLESS`, `VMess`, `Trojan`, `Shadowsocks`, `Hysteria 2`, `WireGuard`).
 - **Ingest & Parse Tab**: Paste subscription links or raw configuration blocks with instant cryptographic deduplication.
-- **Speed & Latency Benchmark Tab**: Multi-stage speed and delay tests with destination presets (`Google`, `Cloudflare`, `YouTube`, `GitHub`).
+- **Speed & Latency Benchmark Tab**: Multi-stage speed and delay tests with destination presets (`Google`, `Cloudflare`, `YouTube`, `GitHub`) and configurable parallel threads.
+- **Application Logs Tab**: Persistent SQLite WAL logging (`app_logs`) with keyword search, level/subsystem filtering, JSON attribute inspection, automated retention pruning (24h, 3d, 7d, 30d, 90d, custom), and export.
 - **One-Click Proxy & System Toggle**: Start or stop the in-process proxy engine and switch Windows system proxy settings instantly.
 
 To run on a custom port without auto-opening the browser:
 ```powershell
-velox ui --port 8080 --no-open
+velox.exe --port 18080 --no-open
 ```
 
 ---
 
-## 3. Command Line Interface (CLI)
+## 3. CLI Options & Headless Flags
 
-For command-line power users, all features are accessible via standalone CLI commands:
+Velox operates cleanly in foreground user-space:
 
-### Step 1: Ingest Subscriptions or Files
 ```powershell
-# Ingest from a subscription URL
-velox parse --sub "https://your-provider.com/sub/token"
+# Custom port
+velox.exe --port 8080
 
-# Ingest from a local text file
-velox parse --file my_configs.txt
+# Headless mode (do not automatically open web browser)
+velox.exe --no-open
 
-# Pipe configs via standard input
-Get-Content my_configs.txt | velox parse
-```
+# Custom database directory
+velox.exe --data-dir "C:\VeloxData"
 
-### Step 2: Test & Rank Proxy Nodes
-```powershell
-# Test against Google 204 endpoint (default)
-velox test
-
-# Test against custom target websites
-velox test -t "https://www.google.com" -t "https://cp.cloudflare.com/generate_204"
-
-# Test only VLESS configs with a limit of 50
-velox test -p vless --limit 50
-```
-
-### Step 3: View Top-Ranked Nodes
-```powershell
-# List top 10 scored nodes
-velox list --limit 10
-
-# Show raw proxy connection URIs
-velox list --show-uri
-```
-
-### Step 4: Connect Through the Proxy
-```powershell
-# Start local mixed proxy (127.0.0.1:1080)
-velox connect
-
-# Start proxy and automatically configure Windows system proxy
-velox connect --system
-
-# Specify custom inbound port
-velox connect --port 2080
+# Enable verbose debug logs
+velox.exe --log-level debug
 ```
 
 ---

@@ -73,28 +73,26 @@ Velox is built from the ground up for power users, developers, and researchers m
 
 ## 🖥️ Interactive Web Dashboard
 
-Velox embeds a zero-dependency, modern dark-mode single-page application directly inside the compiled binary. Launch it anytime:
+Velox embeds a zero-dependency, modern dark-mode single-page application directly inside the compiled binary. Simply run `velox` (or `velox.exe`) without any arguments:
 
 ```bash
-velox ui
-# Aliases:
-velox dashboard
-velox --ui
+velox
 ```
 
-Automatically opens `http://127.0.0.1:18080` in your default browser:
+It automatically starts on `http://127.0.0.1:18080` and opens your default browser:
 
 | Feature Tab | Capabilities |
 | :--- | :--- |
 | **Telemetry Overview** | Real-time proxy status, active node latency, working nodes tally, and database statistics. |
 | **Config Explorer** | Searchable & protocol-filtered table (`VLESS`, `Trojan`, `VMess`, `Shadowsocks`, `Hysteria2`) with ping tags and one-click URI clipboard copy. |
 | **Ingest & Parse** | Dual-input ingestion for subscription URLs and raw configuration paste with cryptographic deduplication. |
-| **Live Benchmarks** | Multi-stage speed & latency tests against destination presets (`Google`, `Cloudflare`, `YouTube`, `GitHub`) with per-node delay tables. |
+| **Live Benchmarks** | Multi-stage speed & latency tests against destination presets (`Google`, `Cloudflare`, `YouTube`, `GitHub`) with configurable parallel threads and real-time streaming. |
+| **Application Logs** | Persistent in-depth SQLite logs (`app_logs`) with keyword search, level/subsystem filtering, JSON attribute inspection, automated retention pruning, and export. |
 | **Proxy Control** | One-click connect / disconnect for the in-process proxy engine (`127.0.0.1:1080`) and one-click OS system proxy toggle. |
 
-To run on a custom port without auto-launching a browser:
+To run on a custom port without auto-launching a browser (e.g. for headless VPS):
 ```bash
-velox ui --port 8080 --no-open
+velox --port 18080 --no-open
 ```
 
 ---
@@ -109,80 +107,58 @@ Install or upgrade to the latest release with a single command:
 curl -fsSL https://raw.githubusercontent.com/AmirAM03/velox/main/install.sh | sudo bash
 ```
 
+Then simply launch:
+```bash
+velox
+```
+
 See the [Linux Deployment Guide](docs/ubuntu.md) for distribution setup and environment variable configuration.
 
 ### Windows (amd64 / arm64)
 
 1. Download the latest `velox-vX.Y.Z-windows-amd64.zip` from [GitHub Releases](https://github.com/AmirAM03/velox/releases).
 2. Extract `velox.exe` to any folder in your PATH (e.g. `C:\Tools\velox`).
-3. Run `velox.exe ui` in PowerShell or Command Prompt to launch the Web Dashboard!
+3. Run `velox.exe` in PowerShell or Command Prompt — the dashboard launches instantly in your browser!
 
 See the [Windows User Guide](docs/windows.md) for PowerShell one-liner and system proxy integration.
 
 ---
 
-## 🚀 CLI Command Reference
+## 📋 Flags & Options Reference
 
-Velox operates cleanly in the foreground without requiring any background services:
+Velox operates cleanly in user space without requiring any background daemons or services:
 
-### 1. Ingest Configurations
 ```bash
-# Ingest from one or more subscription URLs
-velox parse --sub "https://example.com/sub/token"
+# Launch on default port (18080) and open browser
+velox
 
-# Ingest from multiple subscriptions
-velox parse \
-  --sub "https://sub1.com/link" \
-  --sub "https://sub2.com/link"
+# Specify custom port
+velox --port 8080
 
-# Ingest from local file or standard input
-velox parse --file my_configs.txt
-cat my_configs.txt | velox parse
-```
+# Headless mode (do not automatically open web browser)
+velox --no-open
 
-### 2. Run Real Delay Benchmarks
-```bash
-# Benchmark against default target (Google 204)
-velox test
+# Specify custom data directory for SQLite database
+velox --data-dir /path/to/data
 
-# Benchmark against custom destination URLs
-velox test --target "https://www.google.com" --target "https://cloudflare.com"
+# Enable debug logging in console
+velox --log-level debug
 
-# Filter by protocol or limit concurrency
-velox test --protocol vless --limit 100
-```
-
-### 3. Inspect Ranked Configurations
-```bash
-# Display top-ranked nodes based on composite score
-velox list --limit 10
-
-# Display raw proxy connection URIs
-velox list --show-uri
-
-# Filter table by protocol
-velox list --protocol trojan
-```
-
-### 4. Connect Through Proxy
-```bash
-# Start in-process proxy engine (Mixed SOCKS5 + HTTP on 127.0.0.1:1080)
-velox connect
-
-# Start proxy and automatically enable OS system proxy
-velox connect --system
-
-# Specify custom inbound port
-velox connect --port 2080
-```
-
-### 5. Database Deduplication
-```bash
-# Scan database and prune duplicate configs by cryptographic hash
-velox dedup
+# Output console logs in JSON format
+velox --log-json
 ```
 
 ---
+
+## 🪵 Persistent Application Logging & Retention Policy
+
+Velox stores all engine, pipeline, ingestion, proxy, storage, web, and system events directly in the local SQLite database (`app_logs` table) in high-performance WAL mode:
+
+- **No Scattered Log Files**: All logs reside inside `velox.db` alongside configs and benchmark scores.
+- **Configurable Retention Window**: Select `24 Hours`, `3 Days`, `7 Days` (default), `30 Days`, `90 Days`, or custom retention in the Web UI.
+- **Automated Background Pruning**: An automated hourly worker evaluates the retention policy, cleans expired logs, and reclaims space.
+- **Live SSE Streaming**: New log entries stream live into the dashboard table in real time with attribute inspection drawers.
+- **One-Click Export & Vacuum**: Export logs as structured JSON / NDJSON or clear and vacuum the database anytime.
 
 ## 🌐 Supported Protocols & Transports
 

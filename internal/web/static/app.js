@@ -22,6 +22,17 @@ const app = {
     logs: [],
     activeLogLevel: 'all',
     autoScrollLogs: true,
+
+    // Application Logs & Telemetry
+    appLogs: [],
+    appLogsTotal: 0,
+    appLogsPage: 0,
+    appLogsLimit: 100,
+    appLogsLevel: 'all',
+    appLogsSource: 'all',
+    appLogsSearch: '',
+    liveLogsActive: true,
+    expandedLogIds: new Set(),
   },
 
   init() {
@@ -29,6 +40,7 @@ const app = {
     this.setupEventSource();
     this.refreshStatus();
     this.loadTopNodes();
+    this.loadLogStats();
     
     // Poll status periodically every 3 seconds
     setInterval(() => this.refreshStatus(), 3000);
@@ -181,6 +193,84 @@ const app = {
     document.getElementById('btn-run-dedup')?.addEventListener('click', () => {
       this.runDeduplication();
     });
+
+    // Application Logs & Telemetry Events
+    document.getElementById('btn-refresh-logs')?.addEventListener('click', () => {
+      this.loadLogs();
+      this.loadLogStats();
+      this.showToast('Application logs refreshed', 'info');
+    });
+
+    document.getElementById('btn-export-logs')?.addEventListener('click', () => {
+      const url = `/api/logs/export?format=json&level=${encodeURIComponent(this.state.appLogsLevel)}&source=${encodeURIComponent(this.state.appLogsSource)}&search=${encodeURIComponent(this.state.appLogsSearch)}`;
+      window.location.href = url;
+    });
+
+    document.getElementById('btn-prune-logs')?.addEventListener('click', () => {
+      if (confirm('Prune logs older than the current retention policy now?')) {
+        this.pruneLogsNow();
+      }
+    });
+
+    document.getElementById('btn-clear-logs')?.addEventListener('click', () => {
+      if (confirm('Are you sure you want to permanently clear all stored application logs and reclaim database space?')) {
+        this.clearLogsAll();
+      }
+    });
+
+    document.getElementById('btn-save-retention')?.addEventListener('click', () => {
+      const select = document.getElementById('log-retention-select');
+      if (select) {
+        this.saveRetention(select.value);
+      }
+    });
+
+    let logSearchTimeout = null;
+    document.getElementById('logs-search-input')?.addEventListener('input', (e) => {
+      clearTimeout(logSearchTimeout);
+      logSearchTimeout = setTimeout(() => {
+        this.state.appLogsSearch = e.target.value.trim();
+        this.state.appLogsPage = 0;
+        this.loadLogs();
+      }, 300);
+    });
+
+    document.querySelectorAll('.log-filter-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        document.querySelectorAll('.log-filter-chip').forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        this.state.appLogsLevel = chip.dataset.level;
+        this.state.appLogsPage = 0;
+        this.loadLogs();
+      });
+    });
+
+    document.getElementById('logs-source-select')?.addEventListener('change', (e) => {
+      this.state.appLogsSource = e.target.value;
+      this.state.appLogsPage = 0;
+      this.loadLogs();
+    });
+
+    document.getElementById('toggle-live-logs')?.addEventListener('change', (e) => {
+      this.state.liveLogsActive = e.target.checked;
+      const statusEl = document.getElementById('live-logs-status');
+      if (statusEl) {
+        statusEl.textContent = e.target.checked ? '● Live Stream' : '○ Paused';
+        statusEl.className = e.target.checked ? 'text-emerald' : 'text-muted';
+      }
+    });
+
+    document.getElementById('btn-logs-prev')?.addEventListener('click', () => {
+      if (this.state.appLogsPage > 0) {
+        this.state.appLogsPage--;
+        this.loadLogs();
+      }
+    });
+
+    document.getElementById('btn-logs-next')?.addEventListener('click', () => {
+      this.state.appLogsPage++;
+      this.loadLogs();
+    });
   },
 
   switchTab(tabId) {
@@ -194,6 +284,9 @@ const app = {
 
     if (tabId === 'configs') {
       this.loadConfigs();
+    } else if (tabId === 'logs') {
+      this.loadLogs();
+      this.loadLogStats();
     }
   },
 
@@ -515,6 +608,11 @@ const app = {
       case 'log':
         if (msg.entry) {
           this.appendLog(msg.entry);
+        }
+        break;
+      case 'app_log':
+        if (msg.log) {
+          this.handleLiveAppLog(msg.log);
         }
         break;
       case 'cancelled':
@@ -945,8 +1043,13 @@ const app = {
 
   copyURI(uri) {
     if (!uri) return;
-    navigator.clipboard.writeText(uri).then(() => {
-      this.showToast('Raw URI copied to clipboard!', 'success');
+    this.copyToClipboard(uri);
+  },
+
+  copyToClipboard(text) {
+    if (!text) return;
+    navigator.clipboard.writeText(text).then(() => {
+      this.showToast('Copied to clipboard!', 'success');
     }).catch(() => {
       this.showToast('Failed to copy to clipboard', 'error');
     });
@@ -975,9 +1078,262 @@ const app = {
   escapeHtml(str) {
     if (!str) return '';
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  },
+
+  // ==========================================
+  // Application Logs & Telemetry Methods
+  // ==========================================
+
+  async loadLogs() {
+    try {
+      const offset = this.state.appLogsPage * this.state.appLogsLimit;
+      const url = new URL('/api/logs', window.location.origin);
+      url.searchParams.set('limit', this.state.appLogsLimit);
+      url.searchParams.set('offset', offset);
+      if (this.state.appLogsLevel && this.state.appLogsLevel !== 'all') {
+        url.searchParams.set('level', this.state.appLogsLevel);
+      }
+      if (this.state.appLogsSource && this.state.appLogsSource !== 'all') {
+        url.searchParams.set('source', this.state.appLogsSource);
+      }
+      if (this.state.appLogsSearch) {
+        url.searchParams.set('search', this.state.appLogsSearch);
+      }
+
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data = await res.json();
+      this.state.appLogs = data.logs || [];
+      this.state.appLogsTotal = data.total || 0;
+
+      this.renderLogsTable();
+      this.updateLogsPagination();
+    } catch (e) {
+      console.error('Failed to load application logs', e);
+    }
+  },
+
+  async loadLogStats() {
+    try {
+      const res = await fetch('/api/logs/stats');
+      if (!res.ok) return;
+      const data = await res.json();
+
+      const totalEl = document.getElementById('log-stat-total');
+      const errorsEl = document.getElementById('log-stat-errors');
+      const errorRateEl = document.getElementById('log-stat-error-rate');
+      const warnsEl = document.getElementById('log-stat-warns');
+      const dbSizeEl = document.getElementById('log-stat-db-size');
+      const retentionSelect = document.getElementById('log-retention-select');
+      const retentionBadge = document.getElementById('retention-badge');
+
+      const total = data.total_count || 0;
+      const errors = (data.level_counts && data.level_counts['ERROR']) || 0;
+      const warns = (data.level_counts && data.level_counts['WARN']) || 0;
+
+      if (totalEl) totalEl.textContent = total.toLocaleString();
+      if (errorsEl) errorsEl.textContent = errors.toLocaleString();
+      if (errorRateEl) {
+        const rate = total > 0 ? ((errors / total) * 100).toFixed(1) : 0;
+        errorRateEl.textContent = `${rate}% Error Rate`;
+      }
+      if (warnsEl) warnsEl.textContent = warns.toLocaleString();
+      if (dbSizeEl && data.db_size_bytes) {
+        const mb = (data.db_size_bytes / (1024 * 1024)).toFixed(2);
+        dbSizeEl.textContent = `DB Size: ${mb} MB`;
+      }
+      if (data.retention) {
+        if (retentionSelect) retentionSelect.value = data.retention;
+        if (retentionBadge) retentionBadge.textContent = this.formatRetentionName(data.retention);
+      }
+    } catch (e) {
+      console.error('Failed to load log stats', e);
+    }
+  },
+
+  formatRetentionName(r) {
+    switch (r) {
+      case '24h': return '24 Hours';
+      case '3d': return '3 Days';
+      case '7d': return '7 Days';
+      case '30d': return '30 Days';
+      case '90d': return '90 Days';
+      case '365d': return '1 Year';
+      default: return r;
+    }
+  },
+
+  renderLogsTable() {
+    const tbody = document.getElementById('logs-table-tbody');
+    if (!tbody) return;
+
+    if (this.state.appLogs.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" class="text-center py-4 text-muted">No application logs found matching query filters.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = this.state.appLogs.map(log => this.createLogRowHtml(log)).join('');
+  },
+
+  createLogRowHtml(log, isLive = false) {
+    const lvl = (log.level || 'INFO').toUpperCase();
+    const lvlClass = lvl.toLowerCase();
+    const ts = log.timestamp ? log.timestamp.replace('T', ' ').replace('Z', '').split('.')[0] : '—';
+    const hasAttrs = log.attrs && Object.keys(log.attrs).length > 0;
+    const isExpanded = this.state.expandedLogIds.has(log.id);
+
+    let attrsBtn = '<span class="text-muted text-xs">—</span>';
+    if (hasAttrs) {
+      const cnt = Object.keys(log.attrs).length;
+      attrsBtn = `<button class="btn btn-secondary btn-xs" onclick="event.stopPropagation(); app.toggleLogExpand(${log.id});">${isExpanded ? 'Hide' : 'Inspect (' + cnt + ')'}</button>`;
+    }
+
+    const mainRow = `
+      <tr class="log-entry-row ${isExpanded ? 'expanded' : ''} ${isLive ? 'live-new' : ''}" id="log-row-${log.id}" onclick="app.toggleLogExpand(${log.id})">
+        <td class="text-mono text-xs text-muted">${this.escapeHtml(ts)}</td>
+        <td><span class="log-badge ${lvlClass}">${lvl}</span></td>
+        <td><span class="subsystem-badge">${this.escapeHtml(log.source || 'system')}</span></td>
+        <td class="log-message-cell font-medium">${this.escapeHtml(log.message || '')}</td>
+        <td>${attrsBtn}</td>
+      </tr>
+    `;
+
+    if (!isExpanded || !hasAttrs) {
+      return mainRow;
+    }
+
+    const prettyJSON = JSON.stringify(log.attrs, null, 2);
+    const detailRow = `
+      ${mainRow}
+      <tr class="log-details-row" id="log-detail-${log.id}">
+        <td colspan="5">
+          <div class="log-drawer">
+            <div class="log-drawer-header">
+              <span class="text-xs text-muted font-bold">Log Record Attributes & Context</span>
+              <button class="btn btn-secondary btn-xs" onclick="event.stopPropagation(); app.copyToClipboard('${this.escapeHtml(prettyJSON).replace(/'/g, "\\'")}');">Copy JSON</button>
+            </div>
+            <pre class="log-json-block">${this.escapeHtml(prettyJSON)}</pre>
+          </div>
+        </td>
+      </tr>
+    `;
+
+    return detailRow;
+  },
+
+  toggleLogExpand(id) {
+    if (this.state.expandedLogIds.has(id)) {
+      this.state.expandedLogIds.delete(id);
+    } else {
+      this.state.expandedLogIds.add(id);
+    }
+    this.renderLogsTable();
+  },
+
+  updateLogsPagination() {
+    const offset = this.state.appLogsPage * this.state.appLogsLimit;
+    const total = this.state.appLogsTotal;
+    const countInfo = document.getElementById('logs-pagination-info');
+    const prevBtn = document.getElementById('btn-logs-prev');
+    const nextBtn = document.getElementById('btn-logs-next');
+
+    if (countInfo) {
+      const start = total > 0 ? offset + 1 : 0;
+      const end = Math.min(offset + this.state.appLogs.length, total);
+      countInfo.textContent = `Showing ${start}-${end} of ${total} logs`;
+    }
+    if (prevBtn) prevBtn.disabled = this.state.appLogsPage === 0;
+    if (nextBtn) nextBtn.disabled = offset + this.state.appLogs.length >= total;
+  },
+
+  handleLiveAppLog(rec) {
+    if (!this.state.liveLogsActive) return;
+
+    // Filter checks
+    if (this.state.appLogsLevel !== 'all' && rec.level !== this.state.appLogsLevel) {
+      return;
+    }
+    if (this.state.appLogsSource !== 'all' && rec.source !== this.state.appLogsSource) {
+      return;
+    }
+    if (this.state.appLogsSearch) {
+      const term = this.state.appLogsSearch.toLowerCase();
+      const inMsg = (rec.message || '').toLowerCase().includes(term);
+      const inAttrs = (rec.attrs_json || '').toLowerCase().includes(term);
+      if (!inMsg && !inAttrs) return;
+    }
+
+    // Prepend if on page 0
+    if (this.state.appLogsPage === 0) {
+      this.state.appLogs.unshift(rec);
+      if (this.state.appLogs.length > this.state.appLogsLimit) {
+        this.state.appLogs.pop();
+      }
+      this.state.appLogsTotal++;
+
+      const tbody = document.getElementById('logs-table-tbody');
+      if (tbody) {
+        if (tbody.children.length === 1 && tbody.children[0].querySelector('td[colspan]')) {
+          tbody.innerHTML = '';
+        }
+        const rowHtml = this.createLogRowHtml(rec, true);
+        tbody.insertAdjacentHTML('afterbegin', rowHtml);
+        if (tbody.children.length > this.state.appLogsLimit) {
+          tbody.lastElementChild.remove();
+        }
+      }
+      this.updateLogsPagination();
+    }
+  },
+
+  async saveRetention(val) {
+    try {
+      const res = await fetch('/api/logs/retention', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ retention: val })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update retention policy');
+      this.showToast(`Log retention updated to ${this.formatRetentionName(val)}`, 'success');
+      this.loadLogStats();
+      this.loadLogs();
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  async pruneLogsNow() {
+    try {
+      const res = await fetch('/api/logs/prune', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to prune logs');
+      this.showToast(`Pruned ${data.pruned} expired log records`, 'success');
+      this.loadLogStats();
+      this.loadLogs();
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  async clearLogsAll() {
+    try {
+      const res = await fetch('/api/logs/clear', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to clear logs');
+      this.showToast('All application logs cleared and database vacuumed', 'success');
+      this.state.appLogs = [];
+      this.state.appLogsTotal = 0;
+      this.state.appLogsPage = 0;
+      this.loadLogStats();
+      this.loadLogs();
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
   }
 };
 
 document.addEventListener('DOMContentLoaded', () => {
   app.init();
 });
+

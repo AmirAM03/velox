@@ -178,6 +178,18 @@ func (m *BenchmarkJobManager) Log(level, source, message string) {
 	}
 }
 
+// BroadcastAppLog sends a persistent application log record to connected SSE clients.
+func (m *BenchmarkJobManager) BroadcastAppLog(rec *storage.LogRecord) {
+	if rec == nil {
+		return
+	}
+	m.broadcast(map[string]interface{}{
+		"type": "app_log",
+		"log":  rec,
+	})
+}
+
+
 // Start begins a benchmark on the given configs.
 func (m *BenchmarkJobManager) Start(target string, threads int, configs []*model.ProxyConfig) error {
 	m.mu.Lock()

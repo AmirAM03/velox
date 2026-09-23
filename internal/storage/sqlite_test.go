@@ -146,3 +146,111 @@ func TestStorage_Lifecycle(t *testing.T) {
 		t.Errorf("expected 1 config after deletion, got %d", count)
 	}
 }
+
+func TestStorage_LogsAndSettings(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "logs_test.db")
+	store, err := Open(dbPath, nil)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer store.Close()
+
+	// Settings
+	if err := store.SetSetting("log_retention", "30d"); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	val, err := store.GetSetting("log_retention", "7d")
+	if err != nil || val != "30d" {
+		t.Fatalf("expected 30d, got %v (err: %v)", val, err)
+	}
+
+	// Insert log batch
+	tOld := time.Now().Add(-48 * time.Hour)
+	tNow := time.Now()
+	logs := []*LogRecord{
+		{
+			Timestamp: tOld,
+			Level:     "INFO",
+			Source:    "pipeline",
+			Message:   "Ingestion started",
+			Attrs:     map[string]any{"source_url": "https://example.com"},
+		},
+		{
+			Timestamp: tNow,
+			Level:     "ERROR",
+			Source:    "engine",
+			Message:   "Connection handshake failed",
+			Attrs:     map[string]any{"target": "google.com", "code": 504},
+		},
+		{
+			Timestamp: tNow,
+			Level:     "WARN",
+			Source:    "proxy",
+			Message:   "High latency detected",
+			Attrs:     map[string]any{"latency_ms": 1200},
+		},
+	}
+
+	if err := store.InsertLogsBatch(logs); err != nil {
+		t.Fatalf("InsertLogsBatch: %v", err)
+	}
+
+	// Query all
+	records, total, err := store.QueryLogs(LogQueryFilter{})
+	if err != nil {
+		t.Fatalf("QueryLogs: %v", err)
+	}
+	if total != 3 || len(records) != 3 {
+		t.Fatalf("expected 3 logs, got %d total and %d records", total, len(records))
+	}
+
+	// Query by level
+	errLogs, totalErr, err := store.QueryLogs(LogQueryFilter{Level: "error"})
+	if err != nil {
+		t.Fatalf("QueryLogs level: %v", err)
+	}
+	if totalErr != 1 || len(errLogs) != 1 || errLogs[0].Level != "ERROR" {
+		t.Fatalf("expected 1 error log, got %d", totalErr)
+	}
+
+	// Query by search
+	searchLogs, totalSearch, err := store.QueryLogs(LogQueryFilter{Search: "handshake"})
+	if err != nil {
+		t.Fatalf("QueryLogs search: %v", err)
+	}
+	if totalSearch != 1 || len(searchLogs) != 1 {
+		t.Fatalf("expected 1 search match, got %d", totalSearch)
+	}
+
+	// Stats
+	stats, err := store.GetLogStats()
+	if err != nil {
+		t.Fatalf("GetLogStats: %v", err)
+	}
+	if stats.TotalCount != 3 || stats.LevelCounts["ERROR"] != 1 || stats.Retention != "30d" {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	// Prune logs older than 24 hours (should remove 1)
+	pruned, err := store.PruneLogs(24 * time.Hour)
+	if err != nil {
+		t.Fatalf("PruneLogs: %v", err)
+	}
+	if pruned != 1 {
+		t.Fatalf("expected 1 pruned log, got %d", pruned)
+	}
+	recordsAfterPrune, _, _ := store.QueryLogs(LogQueryFilter{})
+	if len(recordsAfterPrune) != 2 {
+		t.Fatalf("expected 2 logs after prune, got %d", len(recordsAfterPrune))
+	}
+
+	// Clear logs
+	if err := store.ClearLogs(); err != nil {
+		t.Fatalf("ClearLogs: %v", err)
+	}
+	emptyRecords, totalEmpty, _ := store.QueryLogs(LogQueryFilter{})
+	if totalEmpty != 0 || len(emptyRecords) != 0 {
+		t.Fatalf("expected 0 logs after clear, got %d", totalEmpty)
+	}
+}
+

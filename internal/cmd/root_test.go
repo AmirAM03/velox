@@ -8,7 +8,7 @@ import (
 
 func TestInitConfig_DefaultDataDir(t *testing.T) {
 	rootCmd := NewRootCmd()
-	rootCmd.SetArgs([]string{"list"})
+	rootCmd.SetArgs([]string{"--no-open"})
 
 	if err := initConfig(rootCmd, nil); err != nil {
 		t.Fatalf("initConfig failed: %v", err)
@@ -28,9 +28,8 @@ func TestInitConfig_ExplicitDataDirFlag(t *testing.T) {
 	defer os.RemoveAll(customDir)
 
 	rootCmd := NewRootCmd()
-	rootCmd.SetArgs([]string{"--data-dir", customDir, "list"})
-	// Parse flags on rootCmd
-	if err := rootCmd.ParseFlags([]string{"--data-dir", customDir}); err != nil {
+	rootCmd.SetArgs([]string{"--data-dir", customDir, "--no-open"})
+	if err := rootCmd.ParseFlags([]string{"--data-dir", customDir, "--no-open"}); err != nil {
 		t.Fatalf("ParseFlags failed: %v", err)
 	}
 

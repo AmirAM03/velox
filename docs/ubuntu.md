@@ -21,84 +21,59 @@ This automated installer:
 
 ---
 
-## 2. Basic Workflow
-
-### Step 1: Ingest Proxy Configurations
-Ingest configs from subscription URLs, local files, or standard input:
-
-```bash
-# Ingest from subscription URLs
-velox parse --sub "https://your-provider.com/sub/token"
-
-# Ingest multiple subscriptions
-velox parse \
-  --sub "https://sub1.com/link" \
-  --sub "https://sub2.com/link"
-
-# Ingest from file or stdin
-velox parse --file configs.txt
-cat configs.txt | velox parse
-```
-
-*Velox automatically cleans `#` and `//` comments, normalizes CRLF line endings, and deduplicates identical proxies by cryptographic hash.*
-
-### Step 2: Test & Rank Configs
-Run the multi-stage testing pipeline against user-defined target URLs:
-
-```bash
-# Test against default target (Google 204)
-velox test
-
-# Test against custom target addresses
-velox test --target "https://www.google.com" --target "https://cloudflare.com"
-
-# Filter by protocol or limit count
-velox test --protocol vless --limit 100
-```
-
-### Step 3: Inspect Ranked Nodes
-```bash
-# View top scored configs
-velox list
-
-# Show raw connection URIs
-velox list --show-uri
-```
-
 ---
 
-## 3. Running Velox
+## 2. Launching the Web Dashboard
 
-### Option A: Interactive Web Dashboard (Recommended)
-Launch the built-in, zero-dependency modern Web Dashboard in your browser:
+Velox is built as an interactive, web-first application with an embedded zero-dependency Web Dashboard. Simply run:
 
 ```bash
-velox ui
-# or:
-velox dashboard
-# or with flags:
-velox --ui --port 18080
+velox
+```
+
+On desktop environments (Ubuntu Desktop with GNOME), this automatically launches the dashboard in your default browser at `http://127.0.0.1:18080`.
+
+### Headless VPS Mode
+On headless VPS or remote servers without a desktop environment, run Velox with `--no-open`:
+
+```bash
+# Launch without auto-opening a local browser
+velox --port 18080 --no-open
+```
+
+You can then access the dashboard via SSH tunnel or reverse proxy:
+```bash
+# SSH Tunnel from your local machine:
+ssh -L 18080:127.0.0.1:18080 user@your-vps-ip
+# Then navigate to http://127.0.0.1:18080 in your local browser
 ```
 
 The Web Dashboard lets you:
-- Explore and search all parsed configurations with real-time protocol badges and latency tags.
-- Ingest subscription URLs or raw configuration blocks with instant deduplication.
-- Trigger multi-stage speed benchmarks and latency tests against custom endpoints.
-- Connect or disconnect the in-process proxy engine with a single click.
-- Toggle system proxy routing directly from the interface.
+- **Telemetry Overview**: Real-time proxy status, active node latency, working nodes tally, and database statistics.
+- **Configurations Tab**: Interactive searchable table across all protocols (`VLESS`, `VMess`, `Trojan`, `Shadowsocks`, `Hysteria 2`, `WireGuard`).
+- **Ingest & Parse Tab**: Paste subscription links or raw configuration blocks with instant cryptographic deduplication.
+- **Speed & Latency Benchmark Tab**: Multi-stage speed and delay tests with destination presets (`Google`, `Cloudflare`, `YouTube`, `GitHub`) and configurable parallel threads.
+- **Application Logs Tab**: Persistent SQLite WAL logging (`app_logs`) with keyword search, level/subsystem filtering, JSON attribute inspection, automated retention pruning (24h, 3d, 7d, 30d, 90d, custom), and export.
+- **One-Click Proxy & System Toggle**: Start or stop the in-process proxy engine and switch desktop GNOME system proxy settings instantly.
 
-### Option B: Run Proxy in CLI Foreground
-Velox provides a **mixed inbound port** (`127.0.0.1:1080` by default) supporting both **SOCKS5** and **HTTP / HTTPS CONNECT** protocols simultaneously on the same port:
+---
+
+## 3. CLI Options & Headless Flags
+
+Velox operates cleanly in user space without requiring any background services:
 
 ```bash
-# Start proxy with auto-failover in foreground
-velox connect
+# Run on custom port
+velox --port 8080
 
-# Start proxy and automatically configure Ubuntu desktop system proxy (GNOME)
-velox connect --system
+# Headless mode
+velox --no-open
 
-# Specify custom port
-velox connect --port 2080
+# Custom data directory
+velox --data-dir /var/lib/velox
+
+# Enable debug logging
+velox --log-level debug
 ```
 
 ---

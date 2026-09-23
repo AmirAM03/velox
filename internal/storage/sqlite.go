@@ -109,6 +109,25 @@ func (s *Store) migrate() error {
 			last_tested_at DATETIME,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+
+		`CREATE TABLE IF NOT EXISTS app_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			level TEXT NOT NULL,
+			source TEXT NOT NULL,
+			message TEXT NOT NULL,
+			attrs TEXT NOT NULL DEFAULT '{}'
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON app_logs(timestamp)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_level ON app_logs(level)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_source ON app_logs(source)`,
+
+		`CREATE TABLE IF NOT EXISTS settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 	}
 
 	for _, m := range migrations {
@@ -600,4 +619,277 @@ func (s *Store) PurgeOldResults(olderThan time.Duration) (int64, error) {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+// LogRecord represents a persistent application log entry.
+type LogRecord struct {
+	ID        int64          `json:"id"`
+	Timestamp time.Time      `json:"timestamp"`
+	Level     string         `json:"level"`
+	Source    string         `json:"source"`
+	Message   string         `json:"message"`
+	Attrs     map[string]any `json:"attrs,omitempty"`
+	AttrsJSON string         `json:"attrs_json,omitempty"`
+}
+
+// LogQueryFilter specifies query parameters for filtering application logs.
+type LogQueryFilter struct {
+	Level  string
+	Source string
+	Search string
+	Since  time.Time
+	Until  time.Time
+	Limit  int
+	Offset int
+}
+
+// LogStats provides aggregated statistics about stored application logs.
+type LogStats struct {
+	TotalCount    int64            `json:"total_count"`
+	LevelCounts   map[string]int64 `json:"level_counts"`
+	OldestTime    *time.Time       `json:"oldest_time,omitempty"`
+	NewestTime    *time.Time       `json:"newest_time,omitempty"`
+	Retention     string           `json:"retention"`
+	DBSizeBytes   int64            `json:"db_size_bytes"`
+}
+
+// InsertLog inserts a single log record.
+func (s *Store) InsertLog(rec *LogRecord) error {
+	return s.InsertLogsBatch([]*LogRecord{rec})
+}
+
+// InsertLogsBatch inserts multiple log records efficiently within a single transaction.
+func (s *Store) InsertLogsBatch(records []*LogRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO app_logs (timestamp, level, source, message, attrs)
+		VALUES (?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return fmt.Errorf("prepare insert log: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, r := range records {
+		ts := r.Timestamp
+		if ts.IsZero() {
+			ts = time.Now()
+		}
+		attrsJSON := r.AttrsJSON
+		if attrsJSON == "" && len(r.Attrs) > 0 {
+			if b, err := json.Marshal(r.Attrs); err == nil {
+				attrsJSON = string(b)
+			}
+		}
+		if attrsJSON == "" {
+			attrsJSON = "{}"
+		}
+
+		if _, err := stmt.Exec(formatDBTime(ts), r.Level, r.Source, r.Message, attrsJSON); err != nil {
+			return fmt.Errorf("exec insert log: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// QueryLogs searches logs matching the filter and returns the records and total count.
+func (s *Store) QueryLogs(filter LogQueryFilter) ([]*LogRecord, int64, error) {
+	var conditions []string
+	var args []any
+
+	if filter.Level != "" && filter.Level != "all" {
+		conditions = append(conditions, "level = ?")
+		args = append(args, strings.ToUpper(filter.Level))
+	}
+	if filter.Source != "" && filter.Source != "all" {
+		conditions = append(conditions, "source = ?")
+		args = append(args, filter.Source)
+	}
+	if filter.Search != "" {
+		conditions = append(conditions, "(message LIKE ? OR attrs LIKE ?)")
+		pattern := "%" + filter.Search + "%"
+		args = append(args, pattern, pattern)
+	}
+	if !filter.Since.IsZero() {
+		conditions = append(conditions, "timestamp >= ?")
+		args = append(args, formatDBTime(filter.Since))
+	}
+	if !filter.Until.IsZero() {
+		conditions = append(conditions, "timestamp <= ?")
+		args = append(args, formatDBTime(filter.Until))
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	// 1. Count total matching rows
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM app_logs %s", whereClause)
+	var totalCount int64
+	if err := s.db.QueryRow(countQuery, args...).Scan(&totalCount); err != nil {
+		return nil, 0, fmt.Errorf("count logs: %w", err)
+	}
+
+	// 2. Fetch page rows
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	} else if limit > 1000 {
+		limit = 1000
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	dataQuery := fmt.Sprintf(`
+		SELECT id, timestamp, level, source, message, attrs
+		FROM app_logs %s
+		ORDER BY timestamp DESC, id DESC
+		LIMIT ? OFFSET ?
+	`, whereClause)
+
+	queryArgs := append(args, limit, offset)
+	rows, err := s.db.Query(dataQuery, queryArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query logs: %w", err)
+	}
+	defer rows.Close()
+
+	var records []*LogRecord
+	for rows.Next() {
+		var r LogRecord
+		var tsStr, attrsStr string
+		if err := rows.Scan(&r.ID, &tsStr, &r.Level, &r.Source, &r.Message, &attrsStr); err != nil {
+			return nil, 0, fmt.Errorf("scan log row: %w", err)
+		}
+		r.Timestamp = parseDBTime(tsStr)
+		r.AttrsJSON = attrsStr
+		if attrsStr != "" && attrsStr != "{}" {
+			var attrs map[string]any
+			if err := json.Unmarshal([]byte(attrsStr), &attrs); err == nil {
+				r.Attrs = attrs
+			}
+		}
+		records = append(records, &r)
+	}
+
+	return records, totalCount, rows.Err()
+}
+
+// PruneLogs deletes log entries older than the specified duration.
+func (s *Store) PruneLogs(olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-olderThan)
+	res, err := s.db.Exec("DELETE FROM app_logs WHERE timestamp < ?", formatDBTime(cutoff))
+	if err != nil {
+		return 0, fmt.Errorf("prune logs: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
+	// Reclaim free space periodically
+	_, _ = s.db.Exec("PRAGMA wal_checkpoint(PASSIVE)")
+	return affected, nil
+}
+
+// ClearLogs deletes all log records and reclaims database space.
+func (s *Store) ClearLogs() error {
+	if _, err := s.db.Exec("DELETE FROM app_logs"); err != nil {
+		return fmt.Errorf("delete logs: %w", err)
+	}
+	_, _ = s.db.Exec("VACUUM")
+	return nil
+}
+
+// GetLogStats returns statistical information about stored application logs.
+func (s *Store) GetLogStats() (*LogStats, error) {
+	stats := &LogStats{
+		LevelCounts: make(map[string]int64),
+		Retention:   "7d",
+	}
+
+	// Total count
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM app_logs").Scan(&stats.TotalCount); err != nil {
+		return nil, fmt.Errorf("count logs: %w", err)
+	}
+
+	// Level counts
+	levelRows, err := s.db.Query("SELECT level, COUNT(*) FROM app_logs GROUP BY level")
+	if err == nil {
+		defer levelRows.Close()
+		for levelRows.Next() {
+			var lvl string
+			var cnt int64
+			if err := levelRows.Scan(&lvl, &cnt); err == nil {
+				stats.LevelCounts[lvl] = cnt
+			}
+		}
+	}
+
+	// Min / Max timestamps
+	var minStr, maxStr sql.NullString
+	if err := s.db.QueryRow("SELECT MIN(timestamp), MAX(timestamp) FROM app_logs").Scan(&minStr, &maxStr); err == nil {
+		if minStr.Valid && minStr.String != "" {
+			t := parseDBTime(minStr.String)
+			stats.OldestTime = &t
+		}
+		if maxStr.Valid && maxStr.String != "" {
+			t := parseDBTime(maxStr.String)
+			stats.NewestTime = &t
+		}
+	}
+
+	// Retention setting
+	ret, err := s.GetSetting("log_retention", "7d")
+	if err == nil && ret != "" {
+		stats.Retention = ret
+	}
+
+	// DB Size in bytes: page_count * page_size
+	var pageCount, pageSize int64
+	if err := s.db.QueryRow("PRAGMA page_count").Scan(&pageCount); err == nil {
+		if err := s.db.QueryRow("PRAGMA page_size").Scan(&pageSize); err == nil {
+			stats.DBSizeBytes = pageCount * pageSize
+		}
+	}
+
+	return stats, nil
+}
+
+// GetSetting reads a key from the settings table, returning defaultValue if not found.
+func (s *Store) GetSetting(key, defaultValue string) (string, error) {
+	var val string
+	err := s.db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&val)
+	if err == sql.ErrNoRows {
+		return defaultValue, nil
+	}
+	if err != nil {
+		return defaultValue, err
+	}
+	return val, nil
+}
+
+// SetSetting writes or updates a setting key-value pair.
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO settings (key, value, updated_at)
+		VALUES (?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(key) DO UPDATE SET
+			value = excluded.value,
+			updated_at = excluded.updated_at
+	`, key, value)
+	return err
 }

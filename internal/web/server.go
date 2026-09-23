@@ -17,6 +17,7 @@ import (
 	"github.com/AmirAM03/velox/internal/config"
 	"github.com/AmirAM03/velox/internal/engine"
 	"github.com/AmirAM03/velox/internal/ingest"
+	loggerPkg "github.com/AmirAM03/velox/internal/logger"
 	"github.com/AmirAM03/velox/internal/model"
 	"github.com/AmirAM03/velox/internal/parser"
 	"github.com/AmirAM03/velox/internal/proxy"
@@ -26,11 +27,12 @@ import (
 
 // Server manages the web dashboard HTTP server and background proxy state.
 type Server struct {
-	cfg    *config.Config
-	store  *storage.Store
-	logger *slog.Logger
-	port   int
-	jobMgr *BenchmarkJobManager
+	cfg       *config.Config
+	store     *storage.Store
+	logger    *slog.Logger
+	dbHandler *loggerPkg.DBHandler
+	port      int
+	jobMgr    *BenchmarkJobManager
 
 	mu             sync.Mutex
 	proxyEngine    engine.Engine
@@ -41,7 +43,7 @@ type Server struct {
 }
 
 // NewServer creates a new web dashboard server.
-func NewServer(cfg *config.Config, store *storage.Store, port int, logger *slog.Logger) *Server {
+func NewServer(cfg *config.Config, store *storage.Store, port int, logger *slog.Logger, dbHandler *loggerPkg.DBHandler) *Server {
 	if port <= 0 {
 		port = 18080
 	}
@@ -51,12 +53,19 @@ func NewServer(cfg *config.Config, store *storage.Store, port int, logger *slog.
 
 	jobMgr := NewBenchmarkJobManager(store, &cfg.Pipeline, cfg.Scoring, logger)
 
+	if dbHandler != nil {
+		dbHandler.AddBroadcast(func(rec *storage.LogRecord) {
+			jobMgr.BroadcastAppLog(rec)
+		})
+	}
+
 	return &Server{
-		cfg:    cfg,
-		store:  store,
-		logger: logger,
-		port:   port,
-		jobMgr: jobMgr,
+		cfg:       cfg,
+		store:     store,
+		logger:    logger,
+		dbHandler: dbHandler,
+		port:      port,
+		jobMgr:    jobMgr,
 	}
 }
 
@@ -97,6 +106,14 @@ func (s *Server) Start(ctx context.Context, openBrowser bool) error {
 	mux.HandleFunc("/api/disconnect", s.handleDisconnect)
 	mux.HandleFunc("/api/system-proxy", s.handleSystemProxy)
 	mux.HandleFunc("/api/dedup", s.handleDedup)
+
+	// Application Logs API
+	mux.HandleFunc("/api/logs", s.handleLogs)
+	mux.HandleFunc("/api/logs/stats", s.handleLogStats)
+	mux.HandleFunc("/api/logs/retention", s.handleLogRetention)
+	mux.HandleFunc("/api/logs/prune", s.handleLogPrune)
+	mux.HandleFunc("/api/logs/clear", s.handleLogClear)
+	mux.HandleFunc("/api/logs/export", s.handleLogExport)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	httpSrv := &http.Server{
@@ -619,3 +636,216 @@ func openURL(url string) {
 	}
 	cmd.Start()
 }
+
+// API: Get Logs
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = 100
+	}
+	offset, _ := strconv.Atoi(q.Get("offset"))
+
+	filter := storage.LogQueryFilter{
+		Level:  q.Get("level"),
+		Source: q.Get("source"),
+		Search: q.Get("search"),
+		Limit:  limit,
+		Offset: offset,
+	}
+
+	if sinceStr := q.Get("since"); sinceStr != "" {
+		if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+			filter.Since = t
+		}
+	}
+	if untilStr := q.Get("until"); untilStr != "" {
+		if t, err := time.Parse(time.RFC3339, untilStr); err == nil {
+			filter.Until = t
+		}
+	}
+
+	records, total, err := s.store.QueryLogs(filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if records == nil {
+		records = []*storage.LogRecord{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"logs":   records,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
+// API: Get Log Stats
+func (s *Server) handleLogStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	stats, err := s.store.GetLogStats()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// API: Update Log Retention
+func (s *Server) handleLogRetention(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		Retention string `json:"retention"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	req.Retention = strings.TrimSpace(req.Retention)
+	dur, err := loggerPkg.ParseRetention(req.Retention)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid retention policy: %v", err))
+		return
+	}
+
+	if err := s.store.SetSetting("log_retention", req.Retention); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("save retention: %v", err))
+		return
+	}
+
+	pruned, _ := s.store.PruneLogs(dur)
+	s.logger.Info("application log retention policy updated",
+		slog.String("source", "system"),
+		slog.String("retention", req.Retention),
+		slog.Int64("pruned_expired", pruned),
+	)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"retention": req.Retention,
+		"pruned":    pruned,
+	})
+}
+
+// API: Manually Prune Logs
+func (s *Server) handleLogPrune(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		Duration string `json:"duration"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	retentionStr := req.Duration
+	if retentionStr == "" {
+		retentionStr, _ = s.store.GetSetting("log_retention", "7d")
+	}
+
+	dur, err := loggerPkg.ParseRetention(retentionStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid duration: %v", err))
+		return
+	}
+
+	pruned, err := s.store.PruneLogs(dur)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("prune logs: %v", err))
+		return
+	}
+
+	s.logger.Info("manual application log prune triggered",
+		slog.String("source", "system"),
+		slog.Int64("pruned_records", pruned),
+		slog.String("retention", retentionStr),
+	)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"pruned":  pruned,
+	})
+}
+
+// API: Clear All Logs
+func (s *Server) handleLogClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	if err := s.store.ClearLogs(); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("clear logs: %v", err))
+		return
+	}
+
+	s.logger.Info("application logs cleared and database vacuumed", slog.String("source", "system"))
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+	})
+}
+
+// API: Export Logs
+func (s *Server) handleLogExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	q := r.URL.Query()
+	format := strings.ToLower(q.Get("format"))
+	if format == "" {
+		format = "json"
+	}
+
+	filter := storage.LogQueryFilter{
+		Level:  q.Get("level"),
+		Source: q.Get("source"),
+		Search: q.Get("search"),
+		Limit:  10000,
+	}
+
+	records, _, err := s.store.QueryLogs(filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	filename := fmt.Sprintf("velox-logs-%s.%s", time.Now().Format("20060102-150405"), format)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+
+	if format == "ndjson" {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		enc := json.NewEncoder(w)
+		for _, rec := range records {
+			_ = enc.Encode(rec)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(records)
+}
+
