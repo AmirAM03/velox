@@ -84,7 +84,8 @@ It automatically starts on `http://127.0.0.1:18080` and opens your default brows
 | Feature Tab | Capabilities |
 | :--- | :--- |
 | **Telemetry Overview** | Real-time proxy status, active node latency, working nodes tally, and database statistics. |
-| **Config Explorer** | Searchable & protocol-filtered table (`VLESS`, `Trojan`, `VMess`, `Shadowsocks`, `Hysteria2`) with ping tags and one-click URI clipboard copy. |
+| **Config Explorer** | Searchable & protocol-filtered table with **Working Only** filter, multi-criteria sorting (Score, Latency, Name, Protocol, Recency), one-click rotation pool toggling, and bulk selection. |
+| **Auto-Rotation Engine** | Periodic background benchmarking of a dedicated configuration pool (`1m`, `5m`, `15m`, `30m`, `1h`) with live countdown ticker and seamless, hot-switched activation of the fastest passing node on `127.0.0.1:1080`. |
 | **Ingest & Parse** | Dual-input ingestion for subscription URLs and raw configuration paste with cryptographic deduplication. |
 | **Live Benchmarks** | Multi-stage speed & latency tests against destination presets (`Google`, `Cloudflare`, `YouTube`, `GitHub`) with configurable parallel threads and real-time streaming. |
 | **Application Logs** | Persistent in-depth SQLite logs (`app_logs`) with keyword search, level/subsystem filtering, JSON attribute inspection, automated retention pruning, and export. |

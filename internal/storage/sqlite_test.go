@@ -254,3 +254,157 @@ func TestStorage_LogsAndSettings(t *testing.T) {
 	}
 }
 
+func TestStorage_QueryConfigsAndRotationPool(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "pool_test.db")
+	store, err := Open(dbPath, nil)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer store.Close()
+
+	// Insert 3 configs
+	cfg1 := &model.ProxyConfig{
+		ID:        "cfg-1",
+		Name:      "Alpha VLESS Fast",
+		RawURI:    "vless://user@1.1.1.1:443",
+		Protocol:  model.ProtocolVLESS,
+		Address:   "1.1.1.1",
+		Port:      443,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	cfg2 := &model.ProxyConfig{
+		ID:        "cfg-2",
+		Name:      "Beta Trojan Slow",
+		RawURI:    "trojan://pass@2.2.2.2:443",
+		Protocol:  model.ProtocolTrojan,
+		Address:   "2.2.2.2",
+		Port:      443,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	cfg3 := &model.ProxyConfig{
+		ID:        "cfg-3",
+		Name:      "Gamma VMess Untested",
+		RawURI:    "vmess://...",
+		Protocol:  model.ProtocolVMess,
+		Address:   "3.3.3.3",
+		Port:      8443,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if _, _, err := store.UpsertConfigs([]*model.ProxyConfig{cfg1, cfg2, cfg3}); err != nil {
+		t.Fatalf("UpsertConfigs: %v", err)
+	}
+
+	// Score cfg1 (working, latency 80ms) and cfg2 (working, latency 450ms)
+	score1 := &model.Score{
+		ConfigID:     cfg1.ID,
+		Composite:    0.08,
+		LatencyScore: 80.0,
+		SuccessScore: 0.0,
+		TestCount:    1,
+		LastTestedAt: time.Now(),
+		UpdatedAt:    time.Now(),
+	}
+	score2 := &model.Score{
+		ConfigID:     cfg2.ID,
+		Composite:    0.45,
+		LatencyScore: 450.0,
+		SuccessScore: 0.0,
+		TestCount:    1,
+		LastTestedAt: time.Now(),
+		UpdatedAt:    time.Now(),
+	}
+	_ = store.UpsertScore(score1)
+	_ = store.UpsertScore(score2)
+
+	// 1. Test QueryConfigs with WorkingOnly = true
+	items, total, err := store.QueryConfigs(ConfigQueryFilter{WorkingOnly: true})
+	if err != nil {
+		t.Fatalf("QueryConfigs working only: %v", err)
+	}
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("expected 2 working configs, got total=%d, items=%d", total, len(items))
+	}
+	if items[0].ID != "cfg-1" {
+		t.Errorf("expected cfg-1 first (best score), got %s", items[0].ID)
+	}
+
+	// 2. Test sorting by Latency
+	itemsLat, _, err := store.QueryConfigs(ConfigQueryFilter{
+		SortBy:    "latency",
+		SortOrder: "desc",
+	})
+	if err != nil {
+		t.Fatalf("QueryConfigs latency sort: %v", err)
+	}
+	if len(itemsLat) != 3 || itemsLat[0].ID != "cfg-2" {
+		t.Errorf("expected cfg-2 first when sorted by latency desc, got %s", itemsLat[0].ID)
+	}
+
+	// 3. Test Rotation Pool: Add
+	added, err := store.AddToRotationPool([]string{cfg1.ID, cfg2.ID})
+	if err != nil {
+		t.Fatalf("AddToRotationPool: %v", err)
+	}
+	if added != 2 {
+		t.Errorf("expected 2 added to pool, got %d", added)
+	}
+
+	// Check pool items
+	poolConfigs, err := store.GetRotationPoolConfigs()
+	if err != nil {
+		t.Fatalf("GetRotationPoolConfigs: %v", err)
+	}
+	if len(poolConfigs) != 2 {
+		t.Fatalf("expected 2 pool configs, got %d", len(poolConfigs))
+	}
+
+	// Verify InPool flag reflects in QueryConfigs
+	queryItems, _, _ := store.QueryConfigs(ConfigQueryFilter{})
+	for _, it := range queryItems {
+		if (it.ID == cfg1.ID || it.ID == cfg2.ID) && !it.InPool {
+			t.Errorf("expected %s to have InPool=true", it.ID)
+		}
+		if it.ID == cfg3.ID && it.InPool {
+			t.Errorf("expected cfg-3 to have InPool=false")
+		}
+	}
+
+	// Test Pool stats
+	totPool, workPool, err := store.GetRotationPoolStats()
+	if err != nil || totPool != 2 || workPool != 2 {
+		t.Fatalf("unexpected pool stats: tot=%d, work=%d, err=%v", totPool, workPool, err)
+	}
+
+	// 4. Test Remove from Pool
+	rem, err := store.RemoveFromRotationPool([]string{cfg1.ID})
+	if err != nil || rem != 1 {
+		t.Fatalf("RemoveFromRotationPool: rem=%d, err=%v", rem, err)
+	}
+	poolAfterRem, _ := store.GetRotationPoolConfigs()
+	if len(poolAfterRem) != 1 || poolAfterRem[0].ID != cfg2.ID {
+		t.Fatalf("expected 1 remaining in pool (cfg-2), got %d", len(poolAfterRem))
+	}
+
+	// 5. Test AddWorkingConfigsToRotationPool
+	addedWork, err := store.AddWorkingConfigsToRotationPool("")
+	if err != nil {
+		t.Fatalf("AddWorkingConfigsToRotationPool: %v", err)
+	}
+	if addedWork != 1 { // cfg1 re-added, cfg2 already in pool
+		t.Errorf("expected 1 newly added working config, got %d", addedWork)
+	}
+
+	// 6. Test Clear pool
+	if err := store.ClearRotationPool(); err != nil {
+		t.Fatalf("ClearRotationPool: %v", err)
+	}
+	poolEmpty, _ := store.GetRotationPoolConfigs()
+	if len(poolEmpty) != 0 {
+		t.Fatalf("expected 0 pool configs after clear, got %d", len(poolEmpty))
+	}
+}
+
+

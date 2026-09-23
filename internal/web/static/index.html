@@ -17,13 +17,14 @@
         <div class="brand-logo">⚡</div>
         <div class="brand-text">
           <span class="brand-title">VELOX</span>
-          <span class="brand-badge">v0.1.7</span>
+          <span class="brand-badge">v0.1.8</span>
         </div>
       </div>
 
       <nav class="nav-links">
         <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
         <button class="nav-btn" data-tab="configs">Configs</button>
+        <button class="nav-btn" data-tab="rotation">🔄 Auto-Rotation</button>
         <button class="nav-btn" data-tab="ingest">Ingest & Parse</button>
         <button class="nav-btn" data-tab="benchmark">Benchmark</button>
         <button class="nav-btn" data-tab="logs">Application Logs</button>
@@ -157,10 +158,41 @@
               <button class="filter-pill" data-proto="trojan">Trojan</button>
               <button class="filter-pill" data-proto="shadowsocks">Shadowsocks</button>
               <button class="filter-pill" data-proto="vmess">VMess</button>
+              <button class="filter-pill working-filter-pill" id="btn-toggle-working-filter" data-working="false">
+                <span class="status-dot-sm"></span> Working Only
+              </button>
             </div>
 
-            <div class="search-wrap">
-              <input type="text" id="configs-search-input" placeholder="Search by name, address, or port..." class="input-search">
+            <div class="filter-actions-right">
+              <div class="sort-control">
+                <label for="configs-sort-select" class="text-xs text-muted">Sort:</label>
+                <select id="configs-sort-select" class="form-select select-sm">
+                  <option value="score">Score (Best First)</option>
+                  <option value="latency">Latency (Lowest First)</option>
+                  <option value="name">Name (A-Z)</option>
+                  <option value="protocol">Protocol</option>
+                  <option value="updated">Recently Tested</option>
+                </select>
+              </div>
+
+              <div class="search-wrap">
+                <input type="text" id="configs-search-input" placeholder="Search configs..." class="input-search">
+              </div>
+            </div>
+          </div>
+
+          <!-- Bulk Selection Toolbar -->
+          <div class="bulk-actions-toolbar" id="configs-bulk-toolbar">
+            <div class="bulk-selected-info">
+              <span id="bulk-selected-count">0 items selected</span>
+            </div>
+            <div class="bulk-btn-group">
+              <button id="btn-bulk-add-pool" class="btn btn-secondary btn-sm" disabled>
+                <span>+ Add Selected to Pool</span>
+              </button>
+              <button id="btn-bulk-add-working" class="btn btn-emerald btn-sm" title="Add all verified passing configurations to the auto-rotation pool">
+                <span>⚡ Add All Working to Pool</span>
+              </button>
             </div>
           </div>
         </div>
@@ -171,17 +203,19 @@
             <table class="data-table">
               <thead>
                 <tr>
-                  <th>Rank</th>
-                  <th>Protocol</th>
+                  <th style="width: 36px;"><input type="checkbox" id="configs-check-all" title="Select / Deselect All on page"></th>
+                  <th style="width: 48px;">Rank</th>
+                  <th style="width: 95px;">Protocol</th>
                   <th>Remark / Name</th>
                   <th>Address & Port</th>
-                  <th>Transport / TLS</th>
-                  <th>Score</th>
-                  <th>Action</th>
+                  <th style="width: 110px;">Transport</th>
+                  <th style="width: 90px;">Latency</th>
+                  <th style="width: 90px;">Score</th>
+                  <th style="width: 175px;">Actions</th>
                 </tr>
               </thead>
               <tbody id="all-configs-tbody">
-                <tr><td colspan="7" class="text-muted text-center py-4">Loading configurations...</td></tr>
+                <tr><td colspan="9" class="text-muted text-center py-4">Loading configurations...</td></tr>
               </tbody>
             </table>
           </div>
@@ -191,6 +225,167 @@
               <button id="btn-prev-page" class="btn btn-secondary btn-sm" disabled>Previous</button>
               <button id="btn-next-page" class="btn btn-secondary btn-sm" disabled>Next</button>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- AUTO-ROTATION VIEW -->
+      <section id="tab-rotation" class="tab-pane">
+        <div class="dashboard-header">
+          <div>
+            <h1 class="page-title">Auto-Rotation Engine</h1>
+            <p class="page-subtitle">Periodically benchmark a dedicated pool of configurations and dynamically activate the lowest-latency passing node</p>
+          </div>
+          <div class="actions-group">
+            <button id="btn-rotation-trigger" class="btn btn-primary">
+              <span class="icon">⚡</span> Rotate Now
+            </button>
+          </div>
+        </div>
+
+        <!-- Rotation Status Cards -->
+        <div class="stats-grid mb-4">
+          <div class="stat-card">
+            <div class="stat-icon-wrap emerald">🔄</div>
+            <div class="stat-data">
+              <span class="stat-label">Auto-Rotation</span>
+              <span id="rot-stat-state" class="stat-value text-sm">Disabled</span>
+              <label class="toggle-switch">
+                <input type="checkbox" id="toggle-rotation-enabled">
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon-wrap cyan">⏱️</div>
+            <div class="stat-data">
+              <span class="stat-label">Next Rotation</span>
+              <span id="rot-stat-countdown" class="stat-value font-mono">--:--</span>
+              <span id="rot-stat-interval-badge" class="stat-tag">Interval: 15m</span>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon-wrap purple">🏊</div>
+            <div class="stat-data">
+              <span class="stat-label">Selection Pool</span>
+              <span id="rot-stat-pool-size" class="stat-value">0 Nodes</span>
+              <span id="rot-stat-working-badge" class="stat-tag success">0 Working</span>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon-wrap amber">🏆</div>
+            <div class="stat-data">
+              <span class="stat-label">Active Node</span>
+              <span id="rot-stat-active-node" class="stat-value text-sm truncate">None</span>
+              <span id="rot-stat-active-metrics" class="stat-tag">—</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Rotation Settings Card -->
+        <div class="glass-card mb-4">
+          <div class="card-header">
+            <h3 class="card-title">Rotation Parameters</h3>
+            <span id="rot-config-status" class="text-xs text-muted">Persisted in SQLite</span>
+          </div>
+          <div class="rotation-config-grid">
+            <div class="form-group">
+              <label class="form-label" for="rot-interval-select">Rotation Interval</label>
+              <select id="rot-interval-select" class="form-select">
+                <option value="1m">Every 1 Minute</option>
+                <option value="2m">Every 2 Minutes</option>
+                <option value="5m">Every 5 Minutes</option>
+                <option value="10m">Every 10 Minutes</option>
+                <option value="15m" selected>Every 15 Minutes</option>
+                <option value="30m">Every 30 Minutes</option>
+                <option value="1h">Every 1 Hour</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="rot-target-input">Benchmark Target URL</label>
+              <input type="text" id="rot-target-input" class="form-input font-mono text-sm" value="https://www.google.com/generate_204">
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="rot-threads-select">Concurrent Threads</label>
+              <select id="rot-threads-select" class="form-select">
+                <option value="10">10 Threads</option>
+                <option value="25">25 Threads</option>
+                <option value="50" selected>50 Threads</option>
+                <option value="100">100 Threads</option>
+              </select>
+            </div>
+
+            <div class="form-group align-end">
+              <button id="btn-save-rotation-cfg" class="btn btn-primary w-full">Save & Apply Parameters</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Selection Pool Table Card -->
+        <div class="glass-card mb-4">
+          <div class="card-header">
+            <div>
+              <h3 class="card-title">Selection Pool</h3>
+              <p class="text-muted text-xs">Only nodes in this pool are dynamically scored during rotation cycles</p>
+            </div>
+            <div class="actions-group">
+              <button id="btn-pool-add-working" class="btn btn-emerald btn-sm">
+                <span>⚡ Add All Working</span>
+              </button>
+              <button id="btn-pool-clear" class="btn btn-danger btn-sm">
+                <span>🗑 Clear Pool</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width: 48px;">#</th>
+                  <th style="width: 95px;">Protocol</th>
+                  <th>Node Remark / Name</th>
+                  <th>Endpoint</th>
+                  <th style="width: 95px;">Latency</th>
+                  <th style="width: 95px;">Score</th>
+                  <th style="width: 140px;">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="rotation-pool-tbody">
+                <tr><td colspan="7" class="text-center py-4 text-muted">No configurations in rotation pool. Add them from Configs Explorer.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Rotation History Timeline Card -->
+        <div class="glass-card">
+          <div class="card-header">
+            <h3 class="card-title">Recent Rotation History</h3>
+            <span id="rot-history-count" class="badge">0 switches</span>
+          </div>
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width: 150px;">Time</th>
+                  <th>Switched From</th>
+                  <th>Switched To (Best)</th>
+                  <th style="width: 95px;">Protocol</th>
+                  <th style="width: 95px;">Latency</th>
+                  <th style="width: 95px;">Score</th>
+                  <th>Selection Reason</th>
+                </tr>
+              </thead>
+              <tbody id="rotation-history-tbody">
+                <tr><td colspan="7" class="text-center py-4 text-muted">No rotation cycles recorded yet.</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </section>

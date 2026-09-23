@@ -145,6 +145,11 @@ func (m *BenchmarkJobManager) broadcast(event map[string]interface{}) {
 	}
 }
 
+// Broadcast sends an SSE event to all connected listeners.
+func (m *BenchmarkJobManager) Broadcast(event map[string]interface{}) {
+	m.broadcast(event)
+}
+
 // Log adds a log entry to memory, broadcasts to UI, and outputs to slog.
 func (m *BenchmarkJobManager) Log(level, source, message string) {
 	entry := LogEntry{

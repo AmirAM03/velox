@@ -11,6 +11,11 @@ const app = {
     configsLimit: 50,
     configsProto: '',
     configsSearch: '',
+    configsWorkingOnly: false,
+    configsSortBy: 'score',
+    configsSelectedIds: new Set(),
+    rotationStatus: null,
+    rotationCountdownTimer: null,
     isConnecting: false,
     eventSource: null,
     benchmarkRunning: false,
@@ -41,9 +46,16 @@ const app = {
     this.refreshStatus();
     this.loadTopNodes();
     this.loadLogStats();
+    this.loadRotationStatus();
+    this.startRotationTicker();
     
     // Poll status periodically every 3 seconds
-    setInterval(() => this.refreshStatus(), 3000);
+    setInterval(() => {
+      this.refreshStatus();
+      if (this.state.activeTab === 'rotation') {
+        this.loadRotationStatus();
+      }
+    }, 3000);
   },
 
   bindEvents() {
@@ -77,13 +89,86 @@ const app = {
 
     // Protocol filter pills in Configs view
     document.querySelectorAll('#configs-proto-filters .filter-pill').forEach(pill => {
+      if (pill.id === 'btn-toggle-working-filter') return;
       pill.addEventListener('click', () => {
-        document.querySelectorAll('#configs-proto-filters .filter-pill').forEach(p => p.classList.remove('active'));
+        document.querySelectorAll('#configs-proto-filters .filter-pill').forEach(p => {
+          if (p.id !== 'btn-toggle-working-filter') p.classList.remove('active');
+        });
         pill.classList.add('active');
         this.state.configsProto = pill.dataset.proto;
         this.state.configsPage = 0;
         this.loadConfigs();
       });
+    });
+
+    // Working Only filter pill toggle
+    const workingPill = document.getElementById('btn-toggle-working-filter');
+    workingPill?.addEventListener('click', () => {
+      this.state.configsWorkingOnly = !this.state.configsWorkingOnly;
+      workingPill.classList.toggle('active', this.state.configsWorkingOnly);
+      this.state.configsPage = 0;
+      this.loadConfigs();
+    });
+
+    // Sort By dropdown
+    document.getElementById('configs-sort-select')?.addEventListener('change', (e) => {
+      this.state.configsSortBy = e.target.value;
+      this.state.configsPage = 0;
+      this.loadConfigs();
+    });
+
+    // Select all visible configs checkbox
+    document.getElementById('configs-check-all')?.addEventListener('change', (e) => {
+      const checked = e.target.checked;
+      document.querySelectorAll('.config-row-check').forEach(cb => {
+        cb.checked = checked;
+        const id = cb.dataset.id;
+        if (checked) {
+          this.state.configsSelectedIds.add(id);
+        } else {
+          this.state.configsSelectedIds.delete(id);
+        }
+      });
+      this.updateBulkToolbar();
+    });
+
+    // Bulk Add Selected to Pool
+    document.getElementById('btn-bulk-add-pool')?.addEventListener('click', async () => {
+      const ids = Array.from(this.state.configsSelectedIds);
+      if (ids.length === 0) return;
+      await this.addConfigsToPool(ids);
+    });
+
+    // Bulk Add Working to Pool
+    const addWorkingAction = async () => {
+      await this.addWorkingToPool();
+    };
+    document.getElementById('btn-bulk-add-working')?.addEventListener('click', addWorkingAction);
+    document.getElementById('btn-pool-add-working')?.addEventListener('click', addWorkingAction);
+
+    // Clear Pool
+    document.getElementById('btn-pool-clear')?.addEventListener('click', async () => {
+      if (!confirm('Clear all configurations from the auto-rotation pool?')) return;
+      await this.clearRotationPool();
+    });
+
+    // Master Rotation Toggle
+    document.getElementById('toggle-rotation-enabled')?.addEventListener('change', (e) => {
+      this.saveRotationConfig({ enabled: e.target.checked });
+    });
+
+    // Save Rotation Parameters
+    document.getElementById('btn-save-rotation-cfg')?.addEventListener('click', () => {
+      const interval = document.getElementById('rot-interval-select')?.value || '15m';
+      const target = document.getElementById('rot-target-input')?.value.trim() || 'https://www.google.com/generate_204';
+      const threads = parseInt(document.getElementById('rot-threads-select')?.value, 10) || 50;
+      const enabled = document.getElementById('toggle-rotation-enabled')?.checked || false;
+      this.saveRotationConfig({ enabled, interval, target, threads });
+    });
+
+    // Trigger Rotation Now
+    document.getElementById('btn-rotation-trigger')?.addEventListener('click', async () => {
+      await this.triggerRotationNow();
     });
 
     // Search input
@@ -284,6 +369,9 @@ const app = {
 
     if (tabId === 'configs') {
       this.loadConfigs();
+    } else if (tabId === 'rotation') {
+      this.loadRotationStatus();
+      this.loadRotationPool();
     } else if (tabId === 'logs') {
       this.loadLogs();
       this.loadLogStats();
@@ -405,7 +493,8 @@ const app = {
     try {
       const res = await fetch('/api/configs?limit=5');
       if (!res.ok) return;
-      const configs = await res.json();
+      const data = await res.json();
+      const configs = data.configs || [];
       const tbody = document.getElementById('top-nodes-tbody');
       if (!tbody) return;
 
@@ -415,8 +504,8 @@ const app = {
       }
 
       tbody.innerHTML = configs.map((cfg, idx) => {
-        const scoreStr = cfg.score ? cfg.score.toFixed(4) : '—';
-        const latStr = cfg.latency_ms ? `${Math.round(cfg.latency_ms)} ms` : '—';
+        const scoreStr = (cfg.score !== undefined && cfg.score !== null) ? cfg.score.toFixed(3) : '—';
+        const latStr = (cfg.latency_ms !== undefined && cfg.latency_ms !== null) ? `${Math.round(cfg.latency_ms)} ms` : '—';
         const badgeClass = `badge-${cfg.protocol}`;
 
         return `
@@ -446,6 +535,8 @@ const app = {
       url.searchParams.set('offset', offset);
       if (this.state.configsProto) url.searchParams.set('protocol', this.state.configsProto);
       if (this.state.configsSearch) url.searchParams.set('search', this.state.configsSearch);
+      if (this.state.configsWorkingOnly) url.searchParams.set('working_only', 'true');
+      if (this.state.configsSortBy) url.searchParams.set('sort_by', this.state.configsSortBy);
 
       const res = await fetch(url);
       if (!res.ok) return;
@@ -457,25 +548,36 @@ const app = {
       if (!tbody) return;
 
       if (configs.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="7" class="text-muted text-center py-4">No configs match your filter.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9" class="text-muted text-center py-4">No configs match your filter.</td></tr>`;
       } else {
         tbody.innerHTML = configs.map((cfg, idx) => {
           const rank = offset + idx + 1;
-          const scoreStr = cfg.score ? cfg.score.toFixed(4) : '—';
+          const scoreStr = (cfg.score !== undefined && cfg.score !== null) ? cfg.score.toFixed(3) : '—';
+          const latStr = (cfg.latency_ms !== undefined && cfg.latency_ms !== null) ? `${Math.round(cfg.latency_ms)} ms` : '—';
+          const latColor = cfg.latency_ms ? (cfg.latency_ms < 300 ? 'text-success' : 'text-amber') : 'text-muted';
           const badgeClass = `badge-${cfg.protocol}`;
           const transportInfo = `${cfg.network || 'tcp'} / ${cfg.security || 'none'}`;
+          const isSelected = this.state.configsSelectedIds.has(cfg.id);
+          const poolBtn = cfg.in_pool
+            ? `<button class="btn-pool in-pool" onclick="app.toggleConfigPool('${cfg.id}', true)" title="Remove from Auto-Rotation Pool">✓ In Pool</button>`
+            : `<button class="btn-pool" onclick="app.toggleConfigPool('${cfg.id}', false)" title="Add to Auto-Rotation Pool">+ Pool</button>`;
 
           return `
             <tr>
+              <td>
+                <input type="checkbox" class="config-row-check" data-id="${cfg.id}" ${isSelected ? 'checked' : ''} onchange="app.onConfigRowCheck(this, '${cfg.id}')">
+              </td>
               <td class="text-muted font-bold">${rank}</td>
               <td><span class="badge ${badgeClass}">${cfg.protocol}</span></td>
               <td class="font-medium">${this.escapeHtml(cfg.name || 'Unnamed Node')}</td>
               <td class="text-mono text-sm">${cfg.address}:${cfg.port}</td>
               <td class="text-xs text-muted">${transportInfo}</td>
+              <td><span class="text-mono ${latColor}">${latStr}</span></td>
               <td><span class="text-mono">${scoreStr}</span></td>
               <td>
-                <div style="display: flex; gap: 0.35rem;">
+                <div style="display: flex; gap: 0.35rem; align-items: center;">
                   <button class="btn btn-secondary btn-sm" onclick="app.connectProxy('${cfg.id}')" title="Connect">Connect</button>
+                  ${poolBtn}
                   <button class="btn btn-secondary btn-sm" onclick="app.copyURI('${this.escapeHtml(cfg.raw_uri)}')" title="Copy URI">📋</button>
                 </div>
               </td>
@@ -483,6 +585,13 @@ const app = {
           `;
         }).join('');
       }
+
+      // Check-all status
+      const checkAll = document.getElementById('configs-check-all');
+      if (checkAll) {
+        checkAll.checked = configs.length > 0 && configs.every(c => this.state.configsSelectedIds.has(c.id));
+      }
+      this.updateBulkToolbar();
 
       // Pagination controls
       const countInfo = document.getElementById('configs-count-info');
@@ -620,6 +729,11 @@ const app = {
         break;
       case 'complete':
         this.handleBenchmarkComplete(msg);
+        break;
+      case 'rotation_status':
+        if (msg.status) {
+          this.renderRotationStatus(msg.status);
+        }
         break;
     }
   },
@@ -1330,6 +1444,308 @@ const app = {
     } catch (e) {
       this.showToast(e.message, 'error');
     }
+  },
+
+  // ==========================================================================
+  // CONFIGS SELECTION & ROTATION POOL METHODS
+  // ==========================================================================
+
+  onConfigRowCheck(input, id) {
+    if (input.checked) {
+      this.state.configsSelectedIds.add(id);
+    } else {
+      this.state.configsSelectedIds.delete(id);
+    }
+    this.updateBulkToolbar();
+  },
+
+  updateBulkToolbar() {
+    const count = this.state.configsSelectedIds.size;
+    const badge = document.getElementById('bulk-selected-count');
+    const btn = document.getElementById('btn-bulk-add-pool');
+    if (badge) badge.textContent = `${count} items selected`;
+    if (btn) btn.disabled = count === 0;
+  },
+
+  async toggleConfigPool(configId, currentlyInPool) {
+    try {
+      const endpoint = currentlyInPool ? '/api/rotation/pool/remove' : '/api/rotation/pool/add';
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config_id: configId })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Pool update failed');
+      this.showToast(currentlyInPool ? 'Removed from rotation pool' : 'Added to rotation pool', 'success');
+      this.loadConfigs();
+      this.loadRotationStatus();
+      this.loadRotationPool();
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  async addConfigsToPool(ids) {
+    try {
+      const res = await fetch('/api/rotation/pool/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config_ids: ids })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to add to pool');
+      this.showToast(`Added ${data.added || ids.length} nodes to rotation pool`, 'success');
+      this.state.configsSelectedIds.clear();
+      this.updateBulkToolbar();
+      this.loadConfigs();
+      this.loadRotationStatus();
+      this.loadRotationPool();
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  async addWorkingToPool() {
+    try {
+      const proto = this.state.configsProto;
+      const url = proto ? `/api/rotation/pool/add-working?protocol=${proto}` : '/api/rotation/pool/add-working';
+      const res = await fetch(url, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to add working nodes');
+      this.showToast(`Added ${data.added || 0} working nodes to rotation pool`, 'success');
+      this.loadConfigs();
+      this.loadRotationStatus();
+      this.loadRotationPool();
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  async clearRotationPool() {
+    try {
+      const res = await fetch('/api/rotation/pool/clear', { method: 'POST' });
+      if (!res.ok) throw new Error('Failed to clear pool');
+      this.showToast('Rotation pool cleared', 'info');
+      this.loadConfigs();
+      this.loadRotationStatus();
+      this.loadRotationPool();
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  async saveRotationConfig(params) {
+    try {
+      const current = this.state.rotationStatus || {};
+      const payload = {
+        enabled: params.enabled !== undefined ? params.enabled : !!current.enabled,
+        interval: params.interval || current.interval || '15m',
+        target: params.target || current.target || 'https://www.google.com/generate_204',
+        threads: params.threads || current.threads || 50,
+      };
+
+      const res = await fetch('/api/rotation/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save configuration');
+      this.state.rotationStatus = data;
+      this.renderRotationStatus(data);
+      this.showToast('Auto-rotation parameters saved', 'success');
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  async triggerRotationNow() {
+    try {
+      const res = await fetch('/api/rotation/trigger', { method: 'POST' });
+      if (!res.ok) throw new Error('Trigger failed');
+      this.showToast('Rotation triggered! Benchmarking pool...', 'info');
+      this.loadRotationStatus();
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  async loadRotationStatus() {
+    try {
+      const res = await fetch('/api/rotation/status');
+      if (!res.ok) return;
+      const data = await res.json();
+      this.state.rotationStatus = data;
+      this.renderRotationStatus(data);
+    } catch (e) {
+      console.error('Failed to load rotation status', e);
+    }
+  },
+
+  async loadRotationPool() {
+    try {
+      const res = await fetch('/api/rotation/pool');
+      if (!res.ok) return;
+      const data = await res.json();
+      this.renderRotationPool(data.configs || []);
+    } catch (e) {
+      console.error('Failed to load rotation pool', e);
+    }
+  },
+
+  renderRotationStatus(data) {
+    if (!data) return;
+    this.state.rotationStatus = data;
+
+    // Toggle & State
+    const toggle = document.getElementById('toggle-rotation-enabled');
+    const stateEl = document.getElementById('rot-stat-state');
+    if (toggle) toggle.checked = !!data.enabled;
+    if (stateEl) {
+      if (data.is_benchmarking) {
+        stateEl.textContent = 'Benchmarking...';
+        stateEl.className = 'stat-value text-sm text-cyan';
+      } else if (data.enabled) {
+        stateEl.textContent = 'Active';
+        stateEl.className = 'stat-value text-sm text-emerald';
+      } else {
+        stateEl.textContent = 'Disabled';
+        stateEl.className = 'stat-value text-sm text-muted';
+      }
+    }
+
+    // Interval badge
+    const intervalBadge = document.getElementById('rot-stat-interval-badge');
+    if (intervalBadge) intervalBadge.textContent = `Interval: ${data.interval || '15m'}`;
+
+    // Selects in form
+    const intervalSelect = document.getElementById('rot-interval-select');
+    if (intervalSelect && data.interval) intervalSelect.value = data.interval;
+    const targetInput = document.getElementById('rot-target-input');
+    if (targetInput && data.target) targetInput.value = data.target;
+    const threadsSelect = document.getElementById('rot-threads-select');
+    if (threadsSelect && data.threads) threadsSelect.value = String(data.threads);
+
+    // Pool counts
+    const poolSize = document.getElementById('rot-stat-pool-size');
+    const workingBadge = document.getElementById('rot-stat-working-badge');
+    if (poolSize) poolSize.textContent = `${data.pool_size || 0} Nodes`;
+    if (workingBadge) workingBadge.textContent = `${data.working_in_pool || 0} Working`;
+
+    // Active node
+    const activeNodeEl = document.getElementById('rot-stat-active-node');
+    const activeMetricsEl = document.getElementById('rot-stat-active-metrics');
+    if (data.active_node) {
+      if (activeNodeEl) {
+        activeNodeEl.textContent = data.active_node.name || `${data.active_node.address}:${data.active_node.port}`;
+        activeNodeEl.title = data.active_node.name;
+      }
+      if (activeMetricsEl) {
+        activeMetricsEl.textContent = `${data.active_node.protocol} | Active`;
+      }
+    } else {
+      if (activeNodeEl) activeNodeEl.textContent = 'None';
+      if (activeMetricsEl) activeMetricsEl.textContent = '—';
+    }
+
+    // History count & table
+    const historyCount = document.getElementById('rot-history-count');
+    if (historyCount) historyCount.textContent = `${(data.history || []).length} switches`;
+    this.renderRotationHistory(data.history || []);
+  },
+
+  renderRotationPool(configs) {
+    const tbody = document.getElementById('rotation-pool-tbody');
+    if (!tbody) return;
+
+    if (!configs || configs.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" class="text-center py-4 text-muted">No configurations in rotation pool. Add them from Configs Explorer.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = configs.map((cfg, idx) => {
+      const scoreStr = (cfg.score !== undefined && cfg.score !== null) ? cfg.score.toFixed(3) : '—';
+      const latStr = (cfg.latency_ms !== undefined && cfg.latency_ms !== null) ? `${Math.round(cfg.latency_ms)} ms` : '—';
+      const badgeClass = `badge-${cfg.protocol}`;
+
+      return `
+        <tr>
+          <td class="text-muted font-bold">${idx + 1}</td>
+          <td><span class="badge ${badgeClass}">${cfg.protocol}</span></td>
+          <td class="font-medium">${this.escapeHtml(cfg.name || 'Unnamed')}</td>
+          <td class="text-mono text-sm">${cfg.address}:${cfg.port}</td>
+          <td><span class="text-mono ${cfg.latency_ms ? 'text-success' : ''}">${latStr}</span></td>
+          <td><span class="text-mono">${scoreStr}</span></td>
+          <td>
+            <div style="display: flex; gap: 0.35rem;">
+              <button class="btn btn-secondary btn-sm" onclick="app.connectProxy('${cfg.id}')" title="Connect Directly">Connect</button>
+              <button class="btn btn-danger btn-sm" onclick="app.toggleConfigPool('${cfg.id}', true)" title="Remove from pool">✕</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  },
+
+  renderRotationHistory(history) {
+    const tbody = document.getElementById('rotation-history-tbody');
+    if (!tbody) return;
+
+    if (!history || history.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" class="text-center py-4 text-muted">No rotation cycles recorded yet.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = history.map(item => {
+      const t = new Date(item.timestamp).toLocaleTimeString();
+      const latStr = item.latency_ms > 0 ? `${Math.round(item.latency_ms)} ms` : '—';
+      const scoreStr = item.score > 0 ? item.score.toFixed(3) : '—';
+      const badgeClass = `badge-${item.protocol}`;
+
+      return `
+        <tr>
+          <td class="text-mono text-xs text-muted">${t}</td>
+          <td class="text-muted text-sm truncate" title="${this.escapeHtml(item.from_node)}">${this.escapeHtml(item.from_node || 'None')}</td>
+          <td class="font-semibold text-emerald truncate" title="${this.escapeHtml(item.to_node)}">${this.escapeHtml(item.to_node)}</td>
+          <td><span class="badge ${badgeClass}">${item.protocol}</span></td>
+          <td><span class="text-mono text-success">${latStr}</span></td>
+          <td><span class="text-mono">${scoreStr}</span></td>
+          <td class="text-xs text-muted">${this.escapeHtml(item.reason || 'Best score')}</td>
+        </tr>
+      `;
+    }).join('');
+  },
+
+  startRotationTicker() {
+    if (this.state.rotationCountdownTimer) clearInterval(this.state.rotationCountdownTimer);
+    this.state.rotationCountdownTimer = setInterval(() => {
+      const countdownEl = document.getElementById('rot-stat-countdown');
+      if (!countdownEl) return;
+
+      const rot = this.state.rotationStatus;
+      if (!rot || !rot.enabled) {
+        countdownEl.textContent = 'Paused';
+        return;
+      }
+      if (rot.is_benchmarking) {
+        countdownEl.textContent = 'Testing...';
+        return;
+      }
+      if (rot.next_rotation_at) {
+        const diffMs = new Date(rot.next_rotation_at).getTime() - Date.now();
+        if (diffMs <= 0) {
+          countdownEl.textContent = '00:00';
+          return;
+        }
+        const totalSec = Math.floor(diffMs / 1000);
+        const m = Math.floor(totalSec / 60);
+        const s = totalSec % 60;
+        countdownEl.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      } else {
+        countdownEl.textContent = '--:--';
+      }
+    }, 1000);
   }
 };
 

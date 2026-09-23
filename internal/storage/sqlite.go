@@ -128,6 +128,13 @@ func (s *Store) migrate() error {
 			value TEXT NOT NULL,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+
+		`CREATE TABLE IF NOT EXISTS rotation_pool (
+			config_id TEXT PRIMARY KEY REFERENCES configs(id) ON DELETE CASCADE,
+			added_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_rotation_pool_added ON rotation_pool(added_at)`,
 	}
 
 	for _, m := range migrations {
@@ -893,3 +900,344 @@ func (s *Store) SetSetting(key, value string) error {
 	`, key, value)
 	return err
 }
+
+// ConfigQueryFilter specifies parameters for filtering, sorting, and paginating configs.
+type ConfigQueryFilter struct {
+	Protocol    string
+	Search      string
+	WorkingOnly bool
+	SortBy      string // "score", "latency", "name", "protocol", "updated"
+	SortOrder   string // "asc", "desc"
+	Limit       int
+	Offset      int
+}
+
+// ConfigItem represents a proxy config enriched with score, latency, and pool membership.
+type ConfigItem struct {
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	Protocol    string     `json:"protocol"`
+	Address     string     `json:"address"`
+	Port        int        `json:"port"`
+	Network     string     `json:"network"`
+	Security    string     `json:"security"`
+	RawURI      string     `json:"raw_uri"`
+	Score       *float64   `json:"score,omitempty"`
+	LatencyMS   *float64   `json:"latency_ms,omitempty"`
+	SuccessRate *float64   `json:"success_rate,omitempty"`
+	LastTested  *time.Time `json:"last_tested_at,omitempty"`
+	InPool      bool       `json:"in_pool"`
+}
+
+// QueryConfigs executes a high-performance, filtered, sorted, paginated query across configs.
+func (s *Store) QueryConfigs(filter ConfigQueryFilter) ([]*ConfigItem, int64, error) {
+	var conditions []string
+	var args []any
+
+	if filter.Protocol != "" && filter.Protocol != "all" {
+		conditions = append(conditions, "c.protocol = ?")
+		args = append(args, filter.Protocol)
+	}
+
+	if filter.WorkingOnly {
+		conditions = append(conditions, "(s.composite IS NOT NULL AND s.composite < 999999 AND s.success_score == 0.0)")
+	}
+
+	if filter.Search != "" {
+		conditions = append(conditions, "(c.name LIKE ? OR c.address LIKE ? OR CAST(c.port AS TEXT) LIKE ?)")
+		pattern := "%" + filter.Search + "%"
+		args = append(args, pattern, pattern, pattern)
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	// 1. Total matching count
+	countQuery := fmt.Sprintf(`
+		SELECT COUNT(*)
+		FROM configs c
+		LEFT JOIN scores s ON c.id = s.config_id
+		LEFT JOIN rotation_pool rp ON c.id = rp.config_id
+		%s
+	`, whereClause)
+
+	var total int64
+	if err := s.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count configs: %w", err)
+	}
+
+	// 2. Ordering
+	orderDir := "ASC"
+	if strings.ToLower(filter.SortOrder) == "desc" {
+		orderDir = "DESC"
+	}
+
+	var orderBy string
+	switch strings.ToLower(filter.SortBy) {
+	case "latency":
+		orderBy = fmt.Sprintf("(s.latency_score IS NULL) ASC, s.latency_score %s, c.id ASC", orderDir)
+	case "name":
+		orderBy = fmt.Sprintf("c.name %s, c.id ASC", orderDir)
+	case "protocol":
+		orderBy = fmt.Sprintf("c.protocol %s, c.id ASC", orderDir)
+	case "updated":
+		orderBy = fmt.Sprintf("(s.last_tested_at IS NULL) ASC, s.last_tested_at %s, c.id ASC", orderDir)
+	default: // "score"
+		orderBy = fmt.Sprintf("(s.composite IS NULL) ASC, s.composite %s, c.id ASC", orderDir)
+	}
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	dataQuery := fmt.Sprintf(`
+		SELECT c.id, c.name, c.protocol, c.address, c.port, c.raw_uri, c.data,
+		       s.composite, s.latency_score, s.success_score, s.last_tested_at,
+		       (rp.config_id IS NOT NULL) AS in_pool
+		FROM configs c
+		LEFT JOIN scores s ON c.id = s.config_id
+		LEFT JOIN rotation_pool rp ON c.id = rp.config_id
+		%s
+		ORDER BY %s
+		LIMIT ? OFFSET ?
+	`, whereClause, orderBy)
+
+	queryArgs := append(args, limit, offset)
+	rows, err := s.db.Query(dataQuery, queryArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query configs: %w", err)
+	}
+	defer rows.Close()
+
+	var items []*ConfigItem
+	for rows.Next() {
+		var item ConfigItem
+		var rawData string
+		var comp, lat, succ sql.NullFloat64
+		var lastTestedStr sql.NullString
+		var inPoolInt int
+
+		if err := rows.Scan(
+			&item.ID, &item.Name, &item.Protocol, &item.Address, &item.Port,
+			&item.RawURI, &rawData, &comp, &lat, &succ, &lastTestedStr, &inPoolInt,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan config item: %w", err)
+		}
+
+		item.InPool = (inPoolInt == 1)
+
+		if rawData != "" {
+			var cfg model.ProxyConfig
+			if err := json.Unmarshal([]byte(rawData), &cfg); err == nil {
+				item.Network = string(cfg.Network)
+				item.Security = string(cfg.Security)
+				if item.Name == "" {
+					item.Name = cfg.DisplayName()
+				}
+			}
+		}
+
+		if comp.Valid {
+			v := comp.Float64
+			item.Score = &v
+		}
+		if lat.Valid {
+			v := lat.Float64
+			item.LatencyMS = &v
+		}
+		if succ.Valid {
+			// success_score = 0 means 100% success rate
+			rate := (1.0 - succ.Float64) * 100.0
+			if rate < 0 {
+				rate = 0
+			}
+			item.SuccessRate = &rate
+		}
+		if lastTestedStr.Valid && lastTestedStr.String != "" {
+			t := parseDBTime(lastTestedStr.String)
+			item.LastTested = &t
+		}
+
+		items = append(items, &item)
+	}
+
+	return items, total, rows.Err()
+}
+
+// AddToRotationPool adds configuration IDs to the auto-rotation pool.
+func (s *Store) AddToRotationPool(configIDs []string) (int64, error) {
+	if len(configIDs) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare("INSERT OR IGNORE INTO rotation_pool (config_id) VALUES (?)")
+	if err != nil {
+		return 0, fmt.Errorf("prepare pool insert: %w", err)
+	}
+	defer stmt.Close()
+
+	var added int64
+	for _, id := range configIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		res, err := stmt.Exec(id)
+		if err == nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				added += n
+			}
+		}
+	}
+
+	return added, tx.Commit()
+}
+
+// RemoveFromRotationPool removes configuration IDs from the auto-rotation pool.
+func (s *Store) RemoveFromRotationPool(configIDs []string) (int64, error) {
+	if len(configIDs) == 0 {
+		return 0, nil
+	}
+
+	placeholders := make([]string, len(configIDs))
+	args := make([]any, len(configIDs))
+	for i, id := range configIDs {
+		placeholders[i] = "?"
+		args[i] = strings.TrimSpace(id)
+	}
+
+	res, err := s.db.Exec(fmt.Sprintf("DELETE FROM rotation_pool WHERE config_id IN (%s)", strings.Join(placeholders, ",")), args...)
+	if err != nil {
+		return 0, fmt.Errorf("delete from pool: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// ClearRotationPool removes all configurations from the auto-rotation pool.
+func (s *Store) ClearRotationPool() error {
+	_, err := s.db.Exec("DELETE FROM rotation_pool")
+	return err
+}
+
+// AddWorkingConfigsToRotationPool inserts all configs with verified working test scores into the pool.
+func (s *Store) AddWorkingConfigsToRotationPool(protocol string) (int64, error) {
+	var query string
+	var args []any
+
+	if protocol != "" && protocol != "all" {
+		query = `
+			INSERT OR IGNORE INTO rotation_pool (config_id)
+			SELECT c.id FROM configs c
+			JOIN scores s ON c.id = s.config_id
+			WHERE s.composite < 999999 AND s.success_score == 0.0 AND c.protocol = ?
+		`
+		args = append(args, protocol)
+	} else {
+		query = `
+			INSERT OR IGNORE INTO rotation_pool (config_id)
+			SELECT c.id FROM configs c
+			JOIN scores s ON c.id = s.config_id
+			WHERE s.composite < 999999 AND s.success_score == 0.0
+		`
+	}
+
+	res, err := s.db.Exec(query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("insert working to pool: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// GetRotationPoolConfigs returns all configurations currently in the rotation pool with their scores.
+func (s *Store) GetRotationPoolConfigs() ([]*ConfigItem, error) {
+	rows, err := s.db.Query(`
+		SELECT c.id, c.name, c.protocol, c.address, c.port, c.raw_uri, c.data,
+		       s.composite, s.latency_score, s.success_score, s.last_tested_at
+		FROM rotation_pool rp
+		JOIN configs c ON rp.config_id = c.id
+		LEFT JOIN scores s ON c.id = s.config_id
+		ORDER BY (s.composite IS NULL) ASC, s.composite ASC, c.id ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query rotation pool: %w", err)
+	}
+	defer rows.Close()
+
+	var items []*ConfigItem
+	for rows.Next() {
+		var item ConfigItem
+		var rawData string
+		var comp, lat, succ sql.NullFloat64
+		var lastTestedStr sql.NullString
+
+		if err := rows.Scan(
+			&item.ID, &item.Name, &item.Protocol, &item.Address, &item.Port,
+			&item.RawURI, &rawData, &comp, &lat, &succ, &lastTestedStr,
+		); err != nil {
+			return nil, fmt.Errorf("scan pool config item: %w", err)
+		}
+
+		item.InPool = true
+
+		if rawData != "" {
+			var cfg model.ProxyConfig
+			if err := json.Unmarshal([]byte(rawData), &cfg); err == nil {
+				item.Network = string(cfg.Network)
+				item.Security = string(cfg.Security)
+				if item.Name == "" {
+					item.Name = cfg.DisplayName()
+				}
+			}
+		}
+
+		if comp.Valid {
+			v := comp.Float64
+			item.Score = &v
+		}
+		if lat.Valid {
+			v := lat.Float64
+			item.LatencyMS = &v
+		}
+		if succ.Valid {
+			rate := (1.0 - succ.Float64) * 100.0
+			if rate < 0 {
+				rate = 0
+			}
+			item.SuccessRate = &rate
+		}
+		if lastTestedStr.Valid && lastTestedStr.String != "" {
+			t := parseDBTime(lastTestedStr.String)
+			item.LastTested = &t
+		}
+
+		items = append(items, &item)
+	}
+
+	return items, rows.Err()
+}
+
+// GetRotationPoolStats returns the total number of items in the pool and how many are working.
+func (s *Store) GetRotationPoolStats() (total int64, working int64, err error) {
+	err = s.db.QueryRow(`
+		SELECT COUNT(*),
+		       COALESCE(SUM(CASE WHEN s.composite IS NOT NULL AND s.composite < 999999 AND s.success_score == 0.0 THEN 1 ELSE 0 END), 0)
+		FROM rotation_pool rp
+		JOIN configs c ON rp.config_id = c.id
+		LEFT JOIN scores s ON c.id = s.config_id
+	`).Scan(&total, &working)
+	return total, working, err
+}
+
