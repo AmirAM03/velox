@@ -272,8 +272,14 @@ func (m *RotationManager) runCycle() {
 	eng := engine.NewXrayEngine(m.logger)
 	defer eng.Close()
 
+	chain, err := m.store.GetBenchmarkMethodology()
+	if err != nil || chain == nil {
+		chain = model.DefaultMethodologyChain()
+	}
+
 	p := pipeline.New(m.pipelineCfg, eng, []string{target}, []int{200, 204}, m.logger)
 	p.SetConcurrency(threads)
+	p.SetMethodology(chain)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -292,13 +298,13 @@ func (m *RotationManager) runCycle() {
 	for _, r := range results {
 		_ = m.store.InsertTestResults(r.Results)
 		existing, _ := m.store.GetScore(r.Config.ID)
-		score := sc.Compute(r.Config.ID, r.Results, existing)
+		score := sc.Compute(r.Config.ID, r.Results, existing, chain)
 		_ = m.store.UpsertScore(score)
 
 		if !r.Failed {
 			var latMS float64
 			for _, tr := range r.Results {
-				if tr.Success && tr.Stage == model.StageProxy {
+				if tr.Success && (tr.Stage == model.StageProxy || len(chain.ActiveSteps()) == 1) {
 					latMS = float64(tr.Latency.Milliseconds())
 				}
 			}

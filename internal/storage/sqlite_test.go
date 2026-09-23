@@ -407,4 +407,55 @@ func TestStorage_QueryConfigsAndRotationPool(t *testing.T) {
 	}
 }
 
+func TestStore_BenchmarkMethodology(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test_methodology.db")
+	store, err := Open(dbPath, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	// 1. Initial should return default chain
+	chain, err := store.GetBenchmarkMethodology()
+	if err != nil {
+		t.Fatalf("GetBenchmarkMethodology initial: %v", err)
+	}
+	if chain == nil || len(chain.Steps) == 0 {
+		t.Fatalf("expected default chain steps, got nil or empty")
+	}
+
+	// 2. Save modified custom chain
+	customChain := &model.BenchmarkMethodologyChain{
+		ScoringMode: model.ScoringModeWeighted,
+		Steps: []model.TestStepConfig{
+			{
+				ID:        "step-url-only",
+				Type:      model.MethodologyHTTPDelay,
+				Name:      "Direct Google TTFB",
+				Enabled:   true,
+				Necessary: true,
+				Priority:  1,
+				Weight:    1.0,
+				IsPrimary: true,
+				TargetURL: "https://www.google.com/generate_204",
+			},
+		},
+	}
+	if err := store.SaveBenchmarkMethodology(customChain); err != nil {
+		t.Fatalf("SaveBenchmarkMethodology: %v", err)
+	}
+
+	// 3. Retrieve and verify
+	loaded, err := store.GetBenchmarkMethodology()
+	if err != nil {
+		t.Fatalf("GetBenchmarkMethodology loaded: %v", err)
+	}
+	if loaded.ScoringMode != model.ScoringModeWeighted {
+		t.Errorf("expected ScoringMode %s, got %s", model.ScoringModeWeighted, loaded.ScoringMode)
+	}
+	if len(loaded.Steps) != 1 || loaded.Steps[0].ID != "step-url-only" {
+		t.Errorf("expected 1 step with id step-url-only, got %+v", loaded.Steps)
+	}
+}
+
 

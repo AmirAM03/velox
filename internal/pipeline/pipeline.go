@@ -29,7 +29,8 @@ type Pipeline struct {
 	targets    []string // Target URLs for Stage 2
 	expect     []int    // Expected HTTP status codes
 	logger     *slog.Logger
-	onProgress ProgressCallback
+	onProgress  ProgressCallback
+	methodology *model.BenchmarkMethodologyChain
 }
 
 // New creates a new Pipeline.
@@ -62,6 +63,13 @@ func (p *Pipeline) SetOnProgress(cb ProgressCallback) {
 	p.onProgress = cb
 }
 
+// SetMethodology configures the dynamic test methodology chain to execute.
+func (p *Pipeline) SetMethodology(m *model.BenchmarkMethodologyChain) {
+	if m != nil && len(m.ActiveSteps()) > 0 {
+		p.methodology = m
+	}
+}
+
 // SetConcurrency dynamically scales worker pools across all pipeline stages.
 func (p *Pipeline) SetConcurrency(threads int) {
 	if threads <= 0 {
@@ -74,60 +82,94 @@ func (p *Pipeline) SetConcurrency(threads int) {
 
 // Result holds the outcome of running a config through the pipeline.
 type Result struct {
-	Config  *model.ProxyConfig
-	Results []model.TestResult
-	Failed  bool
+	Config      *model.ProxyConfig
+	Results     []model.TestResult
+	Failed      bool
 	FailedStage model.TestStage
 }
 
 // Run executes the pipeline on a batch of configs.
-// Each stage filters out failures before the next stage runs.
-// Returns results for all configs (including failures).
+// Each active step in the configured methodology chain is executed sequentially.
+// If a step marked Necessary fails, that config is immediately disqualified and skips subsequent steps.
 func (p *Pipeline) Run(ctx context.Context, configs []*model.ProxyConfig) []Result {
 	results := make([]Result, len(configs))
 	for i, cfg := range configs {
 		results[i] = Result{Config: cfg}
 	}
 
-	// Stage 0: DNS + TCP
-	p.logger.Info("pipeline: stage 0 (DNS+TCP)", "configs", len(configs))
-	survivors := p.runStage(ctx, configs, results, model.StageDNSTCP, p.cfg.Stage0Workers, p.cfg.Stage0Timeout, p.testDNSTCP)
+	chain := p.methodology
+	if chain == nil || len(chain.ActiveSteps()) == 0 {
+		chain = model.DefaultMethodologyChain()
+	}
 
-	// Stage 1: TLS Handshake
-	p.logger.Info("pipeline: stage 1 (TLS)", "configs", len(survivors))
-	survivors = p.runStage(ctx, survivors, results, model.StageTLS, p.cfg.Stage1Workers, p.cfg.Stage1Timeout, p.testTLS)
+	activeSteps := chain.ActiveSteps()
+	p.logger.Info("pipeline: executing methodology chain",
+		"steps", len(activeSteps),
+		"configs", len(configs),
+		"scoring_mode", chain.ScoringMode,
+	)
 
-	// Stage 2: Proxy Functional Test
-	p.logger.Info("pipeline: stage 2 (proxy)", "configs", len(survivors))
-	survivors = p.runStage(ctx, survivors, results, model.StageProxy, p.cfg.Stage2Workers, p.cfg.Stage2Timeout, p.testProxy)
+	survivors := configs
+	for stepIdx, step := range activeSteps {
+		if len(survivors) == 0 {
+			p.logger.Info("pipeline: all configs disqualified before step", "step", step.Name, "priority", step.Priority)
+			break
+		}
+
+		workers := p.cfg.Stage0Workers
+		stage := model.StageDNSTCP
+		switch step.Type {
+		case model.MethodologyTCPPing:
+			workers = p.cfg.Stage0Workers
+			stage = model.StageDNSTCP
+		case model.MethodologyTLSHandshake:
+			workers = p.cfg.Stage1Workers
+			stage = model.StageTLS
+		case model.MethodologyHTTPDelay:
+			workers = p.cfg.Stage2Workers
+			stage = model.StageProxy
+		}
+
+		p.logger.Info("pipeline: executing step",
+			"index", stepIdx+1,
+			"name", step.Name,
+			"type", string(step.Type),
+			"necessary", step.Necessary,
+			"configs", len(survivors),
+		)
+
+		survivors = p.runStep(ctx, survivors, results, step, stage, workers)
+	}
+
+	passedCount := 0
+	for _, r := range results {
+		if !r.Failed {
+			passedCount++
+		}
+	}
 
 	p.logger.Info("pipeline: complete",
 		"total", len(configs),
-		"passed", len(survivors),
-		"failed", len(configs)-len(survivors),
+		"passed", passedCount,
+		"failed", len(configs)-passedCount,
 	)
 
 	return results
 }
 
-// testFunc is the signature for a stage test function.
-type testFunc func(ctx context.Context, cfg *model.ProxyConfig) model.TestResult
-
-// runStage runs a single pipeline stage with bounded concurrency.
-func (p *Pipeline) runStage(
+// runStep runs a single pipeline methodology step with bounded concurrency.
+func (p *Pipeline) runStep(
 	ctx context.Context,
 	configs []*model.ProxyConfig,
 	allResults []Result,
+	step model.TestStepConfig,
 	stage model.TestStage,
 	maxWorkers int,
-	timeout time.Duration,
-	test testFunc,
 ) []*model.ProxyConfig {
 	if len(configs) == 0 {
 		return nil
 	}
 
-	// Create a map from config ID to result index for fast lookup
 	idxMap := make(map[string]int)
 	for i, r := range allResults {
 		idxMap[r.Config.ID] = i
@@ -142,12 +184,13 @@ func (p *Pipeline) runStage(
 	sem := make(chan struct{}, maxWorkers)
 	var wg sync.WaitGroup
 
+	timeout := step.TimeoutDuration()
+
 	for _, cfg := range configs {
 		wg.Add(1)
 		go func(c *model.ProxyConfig) {
 			defer wg.Done()
 
-			// Acquire semaphore
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
@@ -156,6 +199,7 @@ func (p *Pipeline) runStage(
 					config: c,
 					result: model.TestResult{
 						ConfigID: c.ID,
+						StepID:   step.ID,
 						Stage:    stage,
 						Success:  false,
 						Error:    "context cancelled",
@@ -165,12 +209,23 @@ func (p *Pipeline) runStage(
 				return
 			}
 
-			// Run test with timeout
 			testCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 
-			tr := test(testCtx, c)
+			var tr model.TestResult
+			switch step.Type {
+			case model.MethodologyTCPPing:
+				tr = p.testDNSTCP(testCtx, c)
+			case model.MethodologyTLSHandshake:
+				tr = p.testTLS(testCtx, c)
+			case model.MethodologyHTTPDelay:
+				tr = p.testProxyForStep(testCtx, c, step)
+			default:
+				tr = p.testDNSTCP(testCtx, c)
+			}
+
 			tr.ConfigID = c.ID
+			tr.StepID = step.ID
 			tr.Stage = stage
 			tr.TestedAt = time.Now()
 
@@ -178,13 +233,11 @@ func (p *Pipeline) runStage(
 		}(cfg)
 	}
 
-	// Close channel when all workers finish
 	go func() {
 		wg.Wait()
 		close(resultCh)
 	}()
 
-	// Collect results
 	var survivors []*model.ProxyConfig
 	var stagePassed, stageFailed int
 	for sr := range resultCh {
@@ -196,13 +249,24 @@ func (p *Pipeline) runStage(
 			survivors = append(survivors, sr.config)
 		} else {
 			stageFailed++
-			allResults[idx].Failed = true
-			allResults[idx].FailedStage = stage
-			p.logger.Debug("config failed",
-				"stage", stage.String(),
-				"config", sr.config.DisplayName(),
-				"error", sr.result.Error,
-			)
+			if step.Necessary {
+				// Hard filter: disqualify config from subsequent steps
+				allResults[idx].Failed = true
+				allResults[idx].FailedStage = stage
+				p.logger.Debug("config disqualified at necessary step",
+					"step", step.Name,
+					"config", sr.config.DisplayName(),
+					"error", sr.result.Error,
+				)
+			} else {
+				// Non-necessary step: config continues in survivors
+				survivors = append(survivors, sr.config)
+				p.logger.Debug("config failed optional step",
+					"step", step.Name,
+					"config", sr.config.DisplayName(),
+					"error", sr.result.Error,
+				)
+			}
 		}
 
 		if p.onProgress != nil {
@@ -330,9 +394,22 @@ func (p *Pipeline) testTLS(ctx context.Context, cfg *model.ProxyConfig) model.Te
 	}
 }
 
-// testProxy performs Stage 2: functional proxy test via HTTP.
+// testProxy performs Stage 2: functional proxy test via HTTP using default targets.
 func (p *Pipeline) testProxy(ctx context.Context, cfg *model.ProxyConfig) model.TestResult {
+	return p.testProxyForStep(ctx, cfg, model.TestStepConfig{
+		Type:      model.MethodologyHTTPDelay,
+		TimeoutMS: int(p.cfg.Stage2Timeout.Milliseconds()),
+	})
+}
+
+// testProxyForStep performs functional proxy test via HTTP honoring step-specific targets and status expectations.
+func (p *Pipeline) testProxyForStep(ctx context.Context, cfg *model.ProxyConfig, step model.TestStepConfig) model.TestResult {
 	start := time.Now()
+
+	timeout := step.TimeoutDuration()
+	if timeout <= 0 {
+		timeout = p.cfg.Stage2Timeout
+	}
 
 	// Create HTTP client that dials through the proxy engine
 	transport := &http.Transport{
@@ -343,15 +420,25 @@ func (p *Pipeline) testProxy(ctx context.Context, cfg *model.ProxyConfig) model.
 	}
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   p.cfg.Stage2Timeout,
+		Timeout:   timeout,
 		// Don't follow redirects
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
 
+	targets := p.targets
+	if strings.TrimSpace(step.TargetURL) != "" {
+		targets = []string{step.TargetURL}
+	}
+
+	expectCodes := p.expect
+	if len(step.ExpectCodes) > 0 {
+		expectCodes = step.ExpectCodes
+	}
+
 	// Test against each target URL
-	for _, rawTarget := range p.targets {
+	for _, rawTarget := range targets {
 		targetURL := strings.TrimSpace(rawTarget)
 		if targetURL == "" {
 			continue
@@ -383,13 +470,13 @@ func (p *Pipeline) testProxy(ctx context.Context, cfg *model.ProxyConfig) model.
 
 		// Check status code: matching explicit expect list or any valid HTTP 2xx/3xx
 		statusOK := false
-		for _, expected := range p.expect {
+		for _, expected := range expectCodes {
 			if resp.StatusCode == expected {
 				statusOK = true
 				break
 			}
 		}
-		if !statusOK && resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		if !statusOK && len(expectCodes) == 0 && resp.StatusCode >= 200 && resp.StatusCode < 400 {
 			statusOK = true
 		}
 

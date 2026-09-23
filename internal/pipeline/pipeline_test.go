@@ -220,3 +220,113 @@ func TestPipeline_Run_EndToEnd(t *testing.T) {
 		t.Errorf("expected 1 passed and 1 failed, got passed=%d, failed=%d", passCount, failCount)
 	}
 }
+
+func TestPipeline_MethodologyChain_EarlyDisqualification(t *testing.T) {
+	httpRunCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpRunCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+
+	cfg := config.PipelineConfig{
+		Stage0Workers: 2,
+		Stage1Workers: 2,
+		Stage2Workers: 2,
+		Stage0Timeout: 1 * time.Second,
+		Stage1Timeout: 1 * time.Second,
+		Stage2Timeout: 1 * time.Second,
+	}
+
+	mockEng := &mockEngine{
+		dialFunc: func(ctx context.Context, cfg *model.ProxyConfig, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		},
+	}
+
+	p := New(&cfg, mockEng, []string{srv.URL}, []int{200}, nil)
+
+	// Configure chain: Step 1 (TCP Ping, Necessary), Step 2 (HTTP Delay, Necessary)
+	chain := model.BenchmarkMethodologyChain{
+		ScoringMode: model.ScoringModePrimary,
+		Steps: []model.TestStepConfig{
+			{
+				ID:        "step-1-ping",
+				Type:      model.MethodologyTCPPing,
+				Name:      "TCP Reachability",
+				Enabled:   true,
+				Necessary: true,
+				Priority:  1,
+				TimeoutMS: 500,
+			},
+			{
+				ID:        "step-2-http",
+				Type:      model.MethodologyHTTPDelay,
+				Name:      "HTTP Delay",
+				Enabled:   true,
+				Necessary: true,
+				Priority:  2,
+				TimeoutMS: 1000,
+				TargetURL: srv.URL,
+			},
+		},
+	}
+	p.SetMethodology(&chain)
+
+	configs := []*model.ProxyConfig{
+		{
+			ID:       "cfg-good",
+			Address:  "127.0.0.1",
+			Port:     port,
+			Security: model.SecurityNone,
+		},
+		{
+			ID:       "cfg-bad-ping",
+			Address:  "127.0.0.1",
+			Port:     1, // Fails TCP Ping
+			Security: model.SecurityNone,
+		},
+	}
+
+	results := p.Run(context.Background(), configs)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	// cfg-good should have 2 test results (ping + http)
+	var goodRes, badRes *Result
+	for i := range results {
+		if results[i].Config.ID == "cfg-good" {
+			goodRes = &results[i]
+		} else if results[i].Config.ID == "cfg-bad-ping" {
+			badRes = &results[i]
+		}
+	}
+
+	if goodRes == nil || goodRes.Failed {
+		t.Fatalf("expected cfg-good to pass")
+	}
+	if len(goodRes.Results) != 2 {
+		t.Errorf("expected cfg-good to have 2 results, got %d", len(goodRes.Results))
+	}
+
+	if badRes == nil || !badRes.Failed {
+		t.Fatalf("expected cfg-bad-ping to be failed")
+	}
+	// cfg-bad-ping MUST have only 1 result because it failed Necessary Step 1 and was disqualified before HTTP delay!
+	if len(badRes.Results) != 1 {
+		t.Errorf("expected cfg-bad-ping to be disqualified after 1 result, got %d", len(badRes.Results))
+	}
+	if httpRunCount != 1 {
+		t.Errorf("expected HTTP test to be hit only once (for cfg-good), but was hit %d times", httpRunCount)
+	}
+}

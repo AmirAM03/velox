@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -257,8 +258,29 @@ func (m *BenchmarkJobManager) runPipeline(ctx context.Context, configs []*model.
 	eng := engine.NewXrayEngine(m.logger)
 	defer eng.Close()
 
+	chain, err := m.store.GetBenchmarkMethodology()
+	if err != nil || chain == nil {
+		chain = model.DefaultMethodologyChain()
+	}
+
+	// If a custom target was supplied in run options, apply it to HTTP delay steps
+	if strings.TrimSpace(target) != "" {
+		for i := range chain.Steps {
+			if chain.Steps[i].Type == model.MethodologyHTTPDelay && (chain.Steps[i].TargetURL == "" || len(chain.Steps) == 1) {
+				chain.Steps[i].TargetURL = target
+			}
+		}
+	}
+
 	p := pipeline.New(m.pipelineCfg, eng, []string{target}, []int{200, 204}, m.logger)
 	p.SetConcurrency(threads)
+	p.SetMethodology(chain)
+
+	activeSteps := chain.ActiveSteps()
+	var lastStepID string
+	if len(activeSteps) > 0 {
+		lastStepID = activeSteps[len(activeSteps)-1].ID
+	}
 
 	// Attach live progress callback
 	p.SetOnProgress(func(stage model.TestStage, current, total, stagePassed, stageFailed int, result *model.TestResult, cfg *model.ProxyConfig) {
@@ -266,16 +288,19 @@ func (m *BenchmarkJobManager) runPipeline(ctx context.Context, configs []*model.
 		stageName := stage.String()
 		switch stage {
 		case model.StageDNSTCP:
-			m.currentStage = fmt.Sprintf("Stage 0 (DNS+TCP Reachability: %d/%d)", current, total)
+			m.currentStage = fmt.Sprintf("TCP Reachability (%d/%d)", current, total)
 		case model.StageTLS:
-			m.currentStage = fmt.Sprintf("Stage 1 (TLS Handshake: %d/%d)", current, total)
+			m.currentStage = fmt.Sprintf("TLS Handshake (%d/%d)", current, total)
 		case model.StageProxy:
-			m.currentStage = fmt.Sprintf("Stage 2 (Proxy In-Process TTFB: %d/%d)", current, total)
+			m.currentStage = fmt.Sprintf("HTTP Delay (%d/%d)", current, total)
+		default:
+			m.currentStage = fmt.Sprintf("Testing (%d/%d)", current, total)
 		}
 		m.mu.Unlock()
 
-		// Stream individual proxy test completion when it finishes Stage 2 or when it fails
-		if stage == model.StageProxy || !result.Success {
+		// Stream individual proxy test completion when it finishes its last active step or when it fails
+		isFinished := !result.Success || (result.StepID != "" && result.StepID == lastStepID) || stage == model.StageProxy || len(activeSteps) <= 1
+		if isFinished {
 			latMS := float64(result.Latency.Milliseconds())
 			name := cfg.DisplayName()
 			if name == "" {
@@ -295,12 +320,12 @@ func (m *BenchmarkJobManager) runPipeline(ctx context.Context, configs []*model.
 			}
 
 			m.mu.Lock()
-			if result.Success && stage == model.StageProxy {
+			if result.Success {
 				m.passed++
 				if m.fastestMS == 0 || (latMS > 0 && latMS < m.fastestMS) {
 					m.fastestMS = latMS
 				}
-			} else if !result.Success {
+			} else {
 				m.failed++
 			}
 			m.tested++
@@ -336,7 +361,7 @@ func (m *BenchmarkJobManager) runPipeline(ctx context.Context, configs []*model.
 		if !r.Failed {
 			finalPassed++
 			for _, tr := range r.Results {
-				if tr.Success && tr.Stage == model.StageProxy {
+				if tr.Success && (tr.Stage == model.StageProxy || len(activeSteps) == 1) {
 					latMS := float64(tr.Latency.Milliseconds())
 					if fastestMS == 0 || (latMS > 0 && latMS < fastestMS) {
 						fastestMS = latMS
@@ -351,7 +376,7 @@ func (m *BenchmarkJobManager) runPipeline(ctx context.Context, configs []*model.
 			m.logger.Warn("failed to store test results", "error", err)
 		}
 		existing, _ := m.store.GetScore(r.Config.ID)
-		score := sc.Compute(r.Config.ID, r.Results, existing)
+		score := sc.Compute(r.Config.ID, r.Results, existing, chain)
 		_ = m.store.UpsertScore(score)
 	}
 

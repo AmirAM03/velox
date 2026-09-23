@@ -128,7 +128,27 @@ Velox eliminates duplicate proxy nodes across subscription feeds using SHA-256 c
 
 ---
 
-## 6. Smart Composite Scoring Formula
+## 6. Dynamic Benchmark Methodology & Execution Chaining
+
+Velox provides fully customizable, user-defined testing methodology chains rather than a hardcoded black-box flow:
+
+1. **Configurable Test Stages**:
+   - `tcp_ping`: High-concurrency TCP socket dial to proxy host and port.
+   - `tls_handshake`: Full cryptographic handshake with server certificate and SNI validation (including Xray-core REALITY negotiation).
+   - `http_delay`: In-process proxy HTTP GET measuring real Time to First Byte (TTFB) against specified URLs (e.g. Google 204, Cloudflare trace, YouTube).
+
+2. **Sequential Chaining & Early Disqualification ("Necessary" Filter)**:
+   - Each test step in the chain specifies priority/execution order, custom timeout, weight, and a **Necessary (Hard Filter)** attribute.
+   - If a step with `Necessary: true` fails on a proxy node, that node is **immediately disqualified**: subsequent expensive stages are skipped, reducing system I/O, and the node's composite score is marked as Failed (`Composite = 999999`, `SuccessScore = 1.0`).
+   - If a step is optional (`Necessary: false`), surviving nodes proceed to subsequent stages even if that particular test failed.
+
+3. **Scoring Modes**:
+   - `primary_test` (Default): When chained (e.g. Ping + Delay toward URL), passing necessary tests guarantees eligibility, and the latency score is derived directly from the primary test (e.g. HTTP delay). When only a single test is configured, its latency drives the score directly.
+   - `weighted_average`: Blends passing latencies across all active stages proportional to each step's assigned weight.
+
+---
+
+## 7. Smart Composite Scoring Formula
 
 Nodes that pass all testing stages are evaluated using a multi-factor weighted scoring algorithm where **lower scores represent faster, more reliable proxies**:
 

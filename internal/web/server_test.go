@@ -295,4 +295,67 @@ func TestServer_RotationEndpoints(t *testing.T) {
 	}
 }
 
+func TestServer_BenchmarkMethodologyEndpoints(t *testing.T) {
+	srv, store, dbHandler := setupTestServer(t)
+	defer store.Close()
+	defer dbHandler.Close()
+
+	// 1. Initial GET should return default chain
+	req := httptest.NewRequest(http.MethodGet, "/api/benchmark/methodology", nil)
+	w := httptest.NewRecorder()
+	srv.handleBenchmarkMethodology(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/benchmark/methodology status = %d", w.Code)
+	}
+
+	var getResp struct {
+		Success bool                             `json:"success"`
+		Chain   model.BenchmarkMethodologyChain `json:"chain"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &getResp); err != nil {
+		t.Fatalf("unmarshal GET response: %v", err)
+	}
+	if !getResp.Success || len(getResp.Chain.Steps) == 0 {
+		t.Errorf("expected successful GET with default steps, got %+v", getResp)
+	}
+
+	// 2. POST updated chain
+	newChain := model.BenchmarkMethodologyChain{
+		ScoringMode: model.ScoringModeWeighted,
+		Steps: []model.TestStepConfig{
+			{
+				ID:        "step-url-only",
+				Type:      model.MethodologyHTTPDelay,
+				Name:      "Direct Google Ping",
+				Enabled:   true,
+				Necessary: true,
+				Priority:  1,
+				Weight:    1.0,
+				IsPrimary: true,
+				TimeoutMS: 3000,
+				TargetURL: "https://www.google.com/generate_204",
+			},
+		},
+	}
+	body, _ := json.Marshal(newChain)
+	req = httptest.NewRequest(http.MethodPost, "/api/benchmark/methodology", bytes.NewReader(body))
+	w = httptest.NewRecorder()
+	srv.handleBenchmarkMethodology(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /api/benchmark/methodology status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	// 3. Verify changes persisted
+	req = httptest.NewRequest(http.MethodGet, "/api/benchmark/methodology", nil)
+	w = httptest.NewRecorder()
+	srv.handleBenchmarkMethodology(w, req)
+	_ = json.Unmarshal(w.Body.Bytes(), &getResp)
+	if getResp.Chain.ScoringMode != model.ScoringModeWeighted {
+		t.Errorf("expected ScoringMode %s, got %s", model.ScoringModeWeighted, getResp.Chain.ScoringMode)
+	}
+	if len(getResp.Chain.Steps) != 1 || getResp.Chain.Steps[0].ID != "step-url-only" {
+		t.Errorf("expected 1 step with id step-url-only, got %+v", getResp.Chain.Steps)
+	}
+}
+
 

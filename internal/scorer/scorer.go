@@ -21,8 +21,9 @@ func New(cfg config.ScoringConfig) *Scorer {
 }
 
 // Compute calculates a composite score from test results.
-// Lower scores are better.
-func (s *Scorer) Compute(configID string, results []model.TestResult, existing *model.Score) *model.Score {
+// Lower scores are better. If a methodology chain is provided, it enforces necessary step
+// constraints and evaluates latency using primary_test or weighted_average modes.
+func (s *Scorer) Compute(configID string, results []model.TestResult, existing *model.Score, chainOpt ...*model.BenchmarkMethodologyChain) *model.Score {
 	now := time.Now()
 
 	score := &model.Score{
@@ -38,10 +39,157 @@ func (s *Scorer) Compute(configID string, results []model.TestResult, existing *
 
 	if len(results) == 0 {
 		score.Composite = math.MaxFloat64
+		score.SuccessScore = 1.0
+		score.LatencyScore = 1.0
 		return score
 	}
 
-	// Calculate success rate
+	var chain *model.BenchmarkMethodologyChain
+	if len(chainOpt) > 0 && chainOpt[0] != nil {
+		chain = chainOpt[0]
+	}
+
+	// If methodology chain is specified, enforce step necessity and mode
+	if chain != nil && len(chain.ActiveSteps()) > 0 {
+		stepResultMap := make(map[string]model.TestResult)
+		stageResultMap := make(map[model.TestStage]model.TestResult)
+		for _, r := range results {
+			if r.StepID != "" {
+				stepResultMap[r.StepID] = r
+			}
+			stageResultMap[r.Stage] = r
+		}
+
+		// 1. Check if any necessary test failed
+		for _, step := range chain.ActiveSteps() {
+			if step.Necessary {
+				res, ok := stepResultMap[step.ID]
+				if !ok {
+					switch step.Type {
+					case model.MethodologyTCPPing:
+						res, ok = stageResultMap[model.StageDNSTCP]
+					case model.MethodologyTLSHandshake:
+						res, ok = stageResultMap[model.StageTLS]
+					case model.MethodologyHTTPDelay:
+						res, ok = stageResultMap[model.StageProxy]
+					}
+				}
+				if !ok || !res.Success {
+					score.SuccessScore = 1.0
+					score.LatencyScore = 1.0
+					score.Composite = 999999
+					return score
+				}
+			}
+		}
+
+		// 2. Compute latency based on scoring mode
+		if chain.ScoringMode == model.ScoringModeWeighted {
+			var totalWeight float64
+			var weightedLatencyMS float64
+			hasSuccess := false
+
+			for _, step := range chain.ActiveSteps() {
+				res, ok := stepResultMap[step.ID]
+				if !ok {
+					switch step.Type {
+					case model.MethodologyTCPPing:
+						res, ok = stageResultMap[model.StageDNSTCP]
+					case model.MethodologyTLSHandshake:
+						res, ok = stageResultMap[model.StageTLS]
+					case model.MethodologyHTTPDelay:
+						res, ok = stageResultMap[model.StageProxy]
+					}
+				}
+				if ok && res.Success {
+					w := step.Weight
+					if w <= 0 {
+						w = 1.0
+					}
+					totalWeight += w
+					weightedLatencyMS += float64(res.Latency.Milliseconds()) * w
+					hasSuccess = true
+				}
+			}
+
+			if hasSuccess && totalWeight > 0 {
+				finalLatMS := weightedLatencyMS / totalWeight
+				score.LatencyScore = math.Min(finalLatMS/10000.0, 1.0)
+				score.SuccessScore = 0.0
+			} else {
+				score.LatencyScore = 1.0
+				score.SuccessScore = 1.0
+				score.Composite = 999999
+				return score
+			}
+		} else {
+			// Default: "primary_test" mode
+			primaryStep := chain.GetPrimaryStep()
+			var primaryRes *model.TestResult
+			if primaryStep != nil {
+				if r, ok := stepResultMap[primaryStep.ID]; ok {
+					primaryRes = &r
+				} else {
+					switch primaryStep.Type {
+					case model.MethodologyTCPPing:
+						if r, ok := stageResultMap[model.StageDNSTCP]; ok {
+							primaryRes = &r
+						}
+					case model.MethodologyTLSHandshake:
+						if r, ok := stageResultMap[model.StageTLS]; ok {
+							primaryRes = &r
+						}
+					case model.MethodologyHTTPDelay:
+						if r, ok := stageResultMap[model.StageProxy]; ok {
+							primaryRes = &r
+						}
+					}
+				}
+			}
+
+			if primaryRes == nil {
+				if r, ok := stageResultMap[model.StageProxy]; ok {
+					primaryRes = &r
+				} else {
+					for i := len(results) - 1; i >= 0; i-- {
+						if results[i].Success {
+							primaryRes = &results[i]
+							break
+						}
+					}
+				}
+			}
+
+			if primaryRes != nil && primaryRes.Success {
+				latMS := float64(primaryRes.Latency.Milliseconds())
+				score.LatencyScore = math.Min(latMS/10000.0, 1.0)
+				score.SuccessScore = 0.0
+			} else {
+				score.LatencyScore = 1.0
+				score.SuccessScore = 1.0
+				score.Composite = 999999
+				return score
+			}
+		}
+
+		// Stability penalty
+		if existing != nil {
+			score.StabilityPenalty = computeStabilityPenalty(results, existing.StabilityPenalty, s.cfg.StabilityDecay)
+		}
+
+		// Recency bonus
+		hoursSinceTest := time.Since(now).Hours()
+		score.RecencyBonus = math.Min(hoursSinceTest/168.0, 1.0)
+
+		score.Composite = s.cfg.WeightLatency*score.LatencyScore +
+			s.cfg.WeightSuccess*score.SuccessScore +
+			s.cfg.WeightStability*score.StabilityPenalty +
+			s.cfg.WeightRecency*score.RecencyBonus
+
+		return score
+	}
+
+	// Fallback when no chain is specified (standard calculation)
 	successCount := 0
 	var totalLatency time.Duration
 	var latencies []time.Duration

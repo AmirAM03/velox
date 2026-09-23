@@ -32,6 +32,7 @@ func (s TestStage) String() string {
 type TestResult struct {
 	ConfigID  string        `json:"config_id"`
 	Stage     TestStage     `json:"stage"`
+	StepID    string        `json:"step_id,omitempty"`
 	Success   bool          `json:"success"`
 	Error     string        `json:"error,omitempty"`
 	Latency   time.Duration `json:"latency"`          // Total time for this stage

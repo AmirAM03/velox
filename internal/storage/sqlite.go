@@ -901,6 +901,37 @@ func (s *Store) SetSetting(key, value string) error {
 	return err
 }
 
+// SettingBenchmarkMethodology is the settings key for the test methodology chain.
+const SettingBenchmarkMethodology = "benchmark_methodology"
+
+// GetBenchmarkMethodology reads the saved benchmark methodology chain, returning DefaultMethodologyChain if not found.
+func (s *Store) GetBenchmarkMethodology() (*model.BenchmarkMethodologyChain, error) {
+	val, err := s.GetSetting(SettingBenchmarkMethodology, "")
+	if err != nil || strings.TrimSpace(val) == "" {
+		return model.DefaultMethodologyChain(), nil
+	}
+	chain, err := model.ParseMethodologyChain(val)
+	if err != nil {
+		return model.DefaultMethodologyChain(), nil
+	}
+	return chain, nil
+}
+
+// SaveBenchmarkMethodology validates and stores the benchmark methodology chain in the settings table.
+func (s *Store) SaveBenchmarkMethodology(chain *model.BenchmarkMethodologyChain) error {
+	if chain == nil {
+		return fmt.Errorf("methodology chain cannot be nil")
+	}
+	if err := chain.Validate(); err != nil {
+		return err
+	}
+	data, err := json.Marshal(chain)
+	if err != nil {
+		return fmt.Errorf("marshal methodology chain: %w", err)
+	}
+	return s.SetSetting(SettingBenchmarkMethodology, string(data))
+}
+
 // ConfigQueryFilter specifies parameters for filtering, sorting, and paginating configs.
 type ConfigQueryFilter struct {
 	Protocol    string

@@ -48,6 +48,7 @@ const app = {
     this.loadLogStats();
     this.loadRotationStatus();
     this.startRotationTicker();
+    this.loadMethodology();
     
     // Poll status periodically every 3 seconds
     setInterval(() => {
@@ -375,6 +376,8 @@ const app = {
     } else if (tabId === 'logs') {
       this.loadLogs();
       this.loadLogStats();
+    } else if (tabId === 'benchmark') {
+      this.loadMethodology();
     }
   },
 
@@ -1746,6 +1749,454 @@ const app = {
         countdownEl.textContent = '--:--';
       }
     }, 1000);
+  },
+
+  // ==========================================================================
+  // TEST METHODOLOGY & EXECUTION CHAIN
+  // ==========================================================================
+
+  async loadMethodology() {
+    try {
+      const res = await fetch('/api/benchmark/methodology');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.chain) {
+        this.state.methodology = data.chain;
+        this.renderMethodology();
+      }
+    } catch (e) {
+      console.error('Failed to load methodology', e);
+    }
+  },
+
+  renderMethodology() {
+    const chain = this.state.methodology;
+    if (!chain) return;
+
+    // Update count badge
+    const countBadge = document.getElementById('methodology-steps-count');
+    if (countBadge) {
+      const activeCount = (chain.steps || []).filter(s => s.enabled).length;
+      countBadge.textContent = `${activeCount} Active / ${chain.steps ? chain.steps.length : 0} Steps`;
+    }
+
+    // Update scoring mode select
+    const modeSelect = document.getElementById('methodology-scoring-mode');
+    if (modeSelect) {
+      modeSelect.value = chain.scoring_mode || 'primary_test';
+    }
+
+    const container = document.getElementById('methodology-steps-container');
+    if (!container) return;
+
+    if (!chain.steps || chain.steps.length === 0) {
+      container.innerHTML = `<div class="text-center py-4 text-muted">No test steps configured. Click "+ Add Step" or choose a Preset.</div>`;
+      return;
+    }
+
+    // Sort by priority before rendering
+    chain.steps.sort((a, b) => (a.priority || 0) - (b.priority || 0));
+
+    let html = '';
+    chain.steps.forEach((step, idx) => {
+      const isFirst = idx === 0;
+      const isLast = idx === chain.steps.length - 1;
+      const disabledClass = !step.enabled ? 'disabled-step' : '';
+      const typeClass = `type-${step.type}`;
+
+      let typeBadge = '';
+      if (step.type === 'tcp_ping') {
+        typeBadge = `<span class="badge badge-cyan">TCP Ping</span>`;
+      } else if (step.type === 'tls_handshake') {
+        typeBadge = `<span class="badge badge-purple">TLS Handshake</span>`;
+      } else if (step.type === 'http_delay') {
+        typeBadge = `<span class="badge badge-emerald">HTTP Delay Toward URL</span>`;
+      }
+
+      const necessaryBadge = step.necessary
+        ? `<span class="step-badge-necessary" title="Hard Filter: Failure disqualifies node and skips subsequent stages">⚠️ Necessary (Hard Filter)</span>`
+        : `<span class="step-badge-optional" title="Optional: Failure does not disqualify node">Optional</span>`;
+
+      const primaryBadge = step.is_primary
+        ? `<span class="step-badge-primary">★ Primary Score</span>`
+        : '';
+
+      const targetField = step.type === 'http_delay'
+        ? `
+          <div class="step-param-item" style="grid-column: span 2;">
+            <label class="step-param-label">Target URL</label>
+            <input type="text" class="step-param-input" value="${this.escapeHtml(step.target_url || 'https://www.google.com/generate_204')}" onchange="app.updateMethodologyStep(${idx}, 'target_url', this.value)">
+          </div>
+          <div class="step-param-item">
+            <label class="step-param-label">Expected Codes (CSV)</label>
+            <input type="text" class="step-param-input" value="${(step.expect_codes || [200, 204]).join(', ')}" onchange="app.updateMethodologyStepExpectCodes(${idx}, this.value)">
+          </div>
+        `
+        : '';
+
+      html += `
+        <div class="methodology-step-card ${typeClass} ${disabledClass}">
+          <div class="step-card-header">
+            <div class="step-meta-left">
+              <span class="step-badge-priority">Stage #${idx + 1}</span>
+              ${typeBadge}
+              <input type="text" class="step-param-input font-bold" style="width: 170px;" value="${this.escapeHtml(step.name || '')}" onchange="app.updateMethodologyStep(${idx}, 'name', this.value)">
+              ${necessaryBadge}
+              ${primaryBadge}
+            </div>
+
+            <div class="step-actions-right">
+              <label class="checkbox-label text-xs mr-2">
+                <input type="checkbox" ${step.necessary ? 'checked' : ''} onchange="app.toggleMethodologyNecessary(${idx})">
+                <span>Necessary</span>
+              </label>
+
+              <label class="checkbox-label text-xs mr-2">
+                <input type="checkbox" ${step.enabled ? 'checked' : ''} onchange="app.toggleMethodologyStep(${idx})">
+                <span>Enabled</span>
+              </label>
+
+              <button class="btn btn-secondary btn-xs" ${isFirst ? 'disabled' : ''} onclick="app.moveMethodologyStep(${idx}, -1)" title="Move Step Up">▲</button>
+              <button class="btn btn-secondary btn-xs" ${isLast ? 'disabled' : ''} onclick="app.moveMethodologyStep(${idx}, 1)" title="Move Step Down">▼</button>
+              <button class="btn btn-danger btn-xs" onclick="app.removeMethodologyStep(${idx})" title="Remove Step">🗑</button>
+            </div>
+          </div>
+
+          <div class="step-params-grid">
+            <div class="step-param-item">
+              <label class="step-param-label">Timeout (ms)</label>
+              <input type="number" class="step-param-input" value="${step.timeout_ms || 3000}" min="500" max="30000" step="100" onchange="app.updateMethodologyStep(${idx}, 'timeout_ms', parseInt(this.value, 10))">
+            </div>
+
+            <div class="step-param-item">
+              <label class="step-param-label">Scoring Weight (0.0 - 1.0)</label>
+              <input type="number" class="step-param-input" value="${step.weight !== undefined ? step.weight : 0.5}" min="0" max="1" step="0.1" onchange="app.updateMethodologyStep(${idx}, 'weight', parseFloat(this.value))">
+            </div>
+
+            <div class="step-param-item" style="display: flex; justify-content: center; align-items: flex-start;">
+              <label class="step-param-label">Primary Metric</label>
+              <label class="checkbox-label text-xs mt-1">
+                <input type="radio" name="methodology-primary-radio" ${step.is_primary ? 'checked' : ''} onchange="app.setMethodologyPrimary(${idx})">
+                <span>Use as Primary</span>
+              </label>
+            </div>
+
+            ${targetField}
+          </div>
+        </div>
+      `;
+
+      if (!isLast) {
+        html += `
+          <div class="step-connector-flow">
+            <div class="step-connector-line"></div>
+            <span class="step-connector-arrow">↓</span>
+            <span class="text-xs text-muted">Survivors advance to next stage (Failing Necessary step eliminates node)</span>
+            <span class="step-connector-arrow">↓</span>
+            <div class="step-connector-line"></div>
+          </div>
+        `;
+      }
+    });
+
+    container.innerHTML = html;
+  },
+
+  onScoringModeChange(mode) {
+    if (!this.state.methodology) return;
+    this.state.methodology.scoring_mode = mode;
+  },
+
+  moveMethodologyStep(idx, direction) {
+    const chain = this.state.methodology;
+    if (!chain || !chain.steps) return;
+    const targetIdx = idx + direction;
+    if (targetIdx < 0 || targetIdx >= chain.steps.length) return;
+
+    const temp = chain.steps[idx];
+    chain.steps[idx] = chain.steps[targetIdx];
+    chain.steps[targetIdx] = temp;
+
+    // Normalize priorities
+    chain.steps.forEach((s, i) => { s.priority = i + 1; });
+    this.renderMethodology();
+  },
+
+  toggleMethodologyStep(idx) {
+    const chain = this.state.methodology;
+    if (!chain || !chain.steps || !chain.steps[idx]) return;
+    chain.steps[idx].enabled = !chain.steps[idx].enabled;
+    this.renderMethodology();
+  },
+
+  toggleMethodologyNecessary(idx) {
+    const chain = this.state.methodology;
+    if (!chain || !chain.steps || !chain.steps[idx]) return;
+    chain.steps[idx].necessary = !chain.steps[idx].necessary;
+    this.renderMethodology();
+  },
+
+  setMethodologyPrimary(idx) {
+    const chain = this.state.methodology;
+    if (!chain || !chain.steps) return;
+    chain.steps.forEach((s, i) => {
+      s.is_primary = (i === idx);
+    });
+    this.renderMethodology();
+  },
+
+  updateMethodologyStep(idx, field, value) {
+    const chain = this.state.methodology;
+    if (!chain || !chain.steps || !chain.steps[idx]) return;
+    chain.steps[idx][field] = value;
+  },
+
+  updateMethodologyStepExpectCodes(idx, codesStr) {
+    const chain = this.state.methodology;
+    if (!chain || !chain.steps || !chain.steps[idx]) return;
+    const codes = codesStr.split(',')
+      .map(c => parseInt(c.trim(), 10))
+      .filter(c => !isNaN(c) && c > 0);
+    chain.steps[idx].expect_codes = codes;
+  },
+
+  removeMethodologyStep(idx) {
+    const chain = this.state.methodology;
+    if (!chain || !chain.steps) return;
+    if (chain.steps.length <= 1) {
+      this.showToast('At least one step must remain in the chain', 'error');
+      return;
+    }
+    chain.steps.splice(idx, 1);
+    chain.steps.forEach((s, i) => { s.priority = i + 1; });
+    this.renderMethodology();
+  },
+
+  openAddStepModal() {
+    const modal = document.getElementById('modal-add-step');
+    if (modal) modal.classList.remove('hidden');
+  },
+
+  closeAddStepModal() {
+    const modal = document.getElementById('modal-add-step');
+    if (modal) modal.classList.add('hidden');
+  },
+
+  onNewStepTypeChange(type) {
+    const wrap = document.getElementById('new-step-target-wrap');
+    const nameInput = document.getElementById('new-step-name');
+    if (wrap) wrap.style.display = (type === 'http_delay') ? 'block' : 'none';
+    if (nameInput) {
+      if (type === 'tcp_ping') nameInput.value = 'TCP Reachability';
+      else if (type === 'tls_handshake') nameInput.value = 'TLS Handshake';
+      else if (type === 'http_delay') nameInput.value = 'HTTP Delay Toward URL';
+    }
+  },
+
+  confirmAddStep() {
+    const chain = this.state.methodology;
+    if (!chain) return;
+
+    const typeRadio = document.querySelector('input[name="new-step-type"]:checked');
+    const type = typeRadio ? typeRadio.value : 'tcp_ping';
+    const nameInput = document.getElementById('new-step-name');
+    const name = (nameInput && nameInput.value.trim()) || (type === 'http_delay' ? 'HTTP Delay' : (type === 'tls_handshake' ? 'TLS Handshake' : 'TCP Reachability'));
+    const timeoutInput = document.getElementById('new-step-timeout');
+    const timeoutMS = timeoutInput ? parseInt(timeoutInput.value, 10) || 3000 : 3000;
+    const targetInput = document.getElementById('new-step-target');
+    const targetURL = targetInput ? targetInput.value.trim() : 'https://www.google.com/generate_204';
+    const necessaryCheck = document.getElementById('new-step-necessary');
+    const necessary = necessaryCheck ? necessaryCheck.checked : true;
+
+    if (!chain.steps) chain.steps = [];
+    const newStep = {
+      id: `step_${type}_${Date.now()}`,
+      type: type,
+      name: name,
+      enabled: true,
+      necessary: necessary,
+      priority: chain.steps.length + 1,
+      weight: 0.5,
+      is_primary: type === 'http_delay' && !chain.steps.some(s => s.is_primary),
+      timeout_ms: timeoutMS,
+      target_url: type === 'http_delay' ? targetURL : '',
+      expect_codes: type === 'http_delay' ? [200, 204] : []
+    };
+
+    chain.steps.push(newStep);
+    this.closeAddStepModal();
+    this.renderMethodology();
+    this.showToast(`Added step "${name}" to chain`, 'info');
+  },
+
+  async applyMethodologyPreset(preset) {
+    let steps = [];
+    let scoringMode = 'primary_test';
+
+    switch (preset) {
+      case 'url_only':
+        steps = [
+          {
+            id: 'step_http_delay',
+            type: 'http_delay',
+            name: 'Direct HTTP Delay',
+            description: 'Direct measurement of proxy response time toward target URL',
+            enabled: true,
+            necessary: true,
+            priority: 1,
+            weight: 1.0,
+            is_primary: true,
+            timeout_ms: 7000,
+            target_url: 'https://www.google.com/generate_204',
+            expect_codes: [200, 204]
+          }
+        ];
+        scoringMode = 'primary_test';
+        break;
+
+      case 'tcp_only':
+        steps = [
+          {
+            id: 'step_tcp_ping',
+            type: 'tcp_ping',
+            name: 'TCP Port Ping',
+            description: 'Fast host:port socket connect reachability check',
+            enabled: true,
+            necessary: true,
+            priority: 1,
+            weight: 1.0,
+            is_primary: true,
+            timeout_ms: 2500
+          }
+        ];
+        scoringMode = 'primary_test';
+        break;
+
+      case 'deep':
+        steps = [
+          {
+            id: 'step_tcp_ping',
+            type: 'tcp_ping',
+            name: 'TCP Reachability',
+            description: 'Fast socket connect to host:port',
+            enabled: true,
+            necessary: true,
+            priority: 1,
+            weight: 0.2,
+            is_primary: false,
+            timeout_ms: 2500
+          },
+          {
+            id: 'step_tls_handshake',
+            type: 'tls_handshake',
+            name: 'TLS / REALITY Handshake',
+            description: 'Strict cryptographic certificate and SNI validation',
+            enabled: true,
+            necessary: true,
+            priority: 2,
+            weight: 0.3,
+            is_primary: false,
+            timeout_ms: 4000
+          },
+          {
+            id: 'step_http_delay',
+            type: 'http_delay',
+            name: 'HTTP URL Real Delay',
+            description: 'Measured round-trip time toward Google endpoint',
+            enabled: true,
+            necessary: true,
+            priority: 3,
+            weight: 0.5,
+            is_primary: true,
+            timeout_ms: 8000,
+            target_url: 'https://www.google.com/generate_204',
+            expect_codes: [200, 204]
+          }
+        ];
+        scoringMode = 'weighted_average';
+        break;
+
+      case 'standard':
+      default:
+        steps = [
+          {
+            id: 'step_tcp_ping',
+            type: 'tcp_ping',
+            name: 'TCP Port Ping',
+            description: 'Fast socket connect to proxy host:port',
+            enabled: true,
+            necessary: true,
+            priority: 1,
+            weight: 0.2,
+            is_primary: false,
+            timeout_ms: 2500
+          },
+          {
+            id: 'step_tls_handshake',
+            type: 'tls_handshake',
+            name: 'TLS / REALITY Handshake',
+            description: 'TLS handshake with SNI and ALPN negotiation',
+            enabled: true,
+            necessary: false,
+            priority: 2,
+            weight: 0.2,
+            is_primary: false,
+            timeout_ms: 3500
+          },
+          {
+            id: 'step_http_delay',
+            type: 'http_delay',
+            name: 'HTTP URL Real Delay',
+            description: 'In-process proxy GET measuring round-trip TTFB latency',
+            enabled: true,
+            necessary: true,
+            priority: 3,
+            weight: 0.6,
+            is_primary: true,
+            timeout_ms: 7000,
+            target_url: 'https://www.google.com/generate_204',
+            expect_codes: [200, 204]
+          }
+        ];
+        scoringMode = 'primary_test';
+        break;
+    }
+
+    this.state.methodology = {
+      scoring_mode: scoringMode,
+      steps: steps
+    };
+
+    this.renderMethodology();
+    await this.saveMethodology();
+    this.showToast(`Applied preset: ${preset}`, 'info');
+  },
+
+  async saveMethodology() {
+    const chain = this.state.methodology;
+    if (!chain) return;
+
+    const btn = document.getElementById('btn-save-methodology');
+    if (btn) btn.disabled = true;
+
+    try {
+      const res = await fetch('/api/benchmark/methodology', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(chain)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save methodology');
+
+      this.state.methodology = data.chain;
+      this.renderMethodology();
+      this.showToast('Test methodology chain saved and applied!', 'success');
+    } catch (e) {
+      console.error('Failed to save methodology', e);
+      this.showToast(e.message || 'Error saving methodology', 'error');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   }
 };
 

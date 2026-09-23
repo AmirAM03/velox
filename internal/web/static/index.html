@@ -446,6 +446,51 @@
               <span id="benchmark-header-text">Ready</span>
             </span>
           </div>
+        <!-- Test Methodology & Execution Chain Designer -->
+        <div class="glass-card mb-4 methodology-designer-card">
+          <div class="card-header pb-2 flex-wrap">
+            <div>
+              <div class="flex-align gap-2">
+                <h3 class="card-title">Test Methodology & Execution Chain</h3>
+                <span class="badge badge-cyan" id="methodology-steps-count">3 Steps Configured</span>
+              </div>
+              <p class="page-subtitle text-xs mt-1">Configure test stages, execution sequence, timeouts, necessity filters, and normalized scoring</p>
+            </div>
+            <div class="actions-group flex-wrap">
+              <div class="preset-pill-group">
+                <span class="text-xs text-muted mr-1">Presets:</span>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="app.applyMethodologyPreset('standard')">Standard (3-Stage)</button>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="app.applyMethodologyPreset('url_only')">Direct URL Only</button>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="app.applyMethodologyPreset('tcp_only')">TCP Ping Only</button>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="app.applyMethodologyPreset('deep')">Deep Verification</button>
+              </div>
+              <button id="btn-add-methodology-step" class="btn btn-secondary btn-sm" onclick="app.openAddStepModal()">
+                <span>+ Add Step</span>
+              </button>
+              <button id="btn-save-methodology" class="btn btn-primary btn-sm" onclick="app.saveMethodology()">
+                <span>💾 Save Methodology</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Methodology Global Settings Bar -->
+          <div class="methodology-bar">
+            <div class="methodology-setting-item">
+              <label class="text-xs text-muted font-bold" for="methodology-scoring-mode">Final Score Calculation Mode:</label>
+              <select id="methodology-scoring-mode" class="form-select select-sm" onchange="app.onScoringModeChange(this.value)">
+                <option value="primary_test">Primary Test Latency (Hard-filtered by Necessary tests)</option>
+                <option value="weighted_average">Weighted Average (Blend latency across stages by weights)</option>
+              </select>
+            </div>
+            <div class="methodology-info-note text-xs text-muted">
+              <span>💡 <strong>Necessary Filter:</strong> Failing a necessary test immediately disqualifies the node, skipping remaining stages and marking score as Failed.</span>
+            </div>
+          </div>
+
+          <!-- Dynamic Steps Chain -->
+          <div id="methodology-steps-container" class="methodology-chain-list mt-3">
+            <!-- Dynamically populated step cards -->
+          </div>
         </div>
 
         <div class="benchmark-grid">
@@ -763,6 +808,64 @@
           </div>
         </div>
       </section>
+
+  <!-- Modal: Add Methodology Step -->
+  <div id="modal-add-step" class="modal-overlay hidden">
+    <div class="modal-content glass-card">
+      <div class="modal-header">
+        <h3 class="modal-title">Add Methodology Test Step</h3>
+        <button class="modal-close-btn" onclick="app.closeAddStepModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group mb-3">
+          <label class="form-label">Step Test Type</label>
+          <div class="step-type-selector">
+            <label class="step-type-card active">
+              <input type="radio" name="new-step-type" value="tcp_ping" checked onchange="app.onNewStepTypeChange(this.value)">
+              <div class="step-type-title">TCP Port Ping</div>
+              <div class="step-type-desc">Fast TCP handshake to check host & port reachability</div>
+            </label>
+            <label class="step-type-card">
+              <input type="radio" name="new-step-type" value="tls_handshake" onchange="app.onNewStepTypeChange(this.value)">
+              <div class="step-type-title">TLS / REALITY Handshake</div>
+              <div class="step-type-desc">Cryptographic handshake with SNI and certificate validation</div>
+            </label>
+            <label class="step-type-card">
+              <input type="radio" name="new-step-type" value="http_delay" onchange="app.onNewStepTypeChange(this.value)">
+              <div class="step-type-title">HTTP Delay Toward URL</div>
+              <div class="step-type-desc">Full proxy round-trip measuring real TTFB toward destination URL</div>
+            </label>
+          </div>
+        </div>
+
+        <div class="form-group mb-3">
+          <label class="form-label" for="new-step-name">Step Name</label>
+          <input type="text" id="new-step-name" class="form-input" placeholder="e.g. TCP Ping">
+        </div>
+
+        <div class="form-group mb-3">
+          <label class="form-label" for="new-step-timeout">Timeout (ms)</label>
+          <input type="number" id="new-step-timeout" class="form-input" value="3000" min="500" max="30000" step="100">
+        </div>
+
+        <div class="form-group mb-3" id="new-step-target-wrap" style="display: none;">
+          <label class="form-label" for="new-step-target">Target URL (for HTTP Delay)</label>
+          <input type="url" id="new-step-target" class="form-input" value="https://www.google.com/generate_204" placeholder="https://www.google.com/generate_204">
+        </div>
+
+        <div class="form-group mb-3">
+          <label class="checkbox-label">
+            <input type="checkbox" id="new-step-necessary" checked>
+            <span><strong>Necessary (Hard Filter):</strong> Disqualify node immediately if this test fails</span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="app.closeAddStepModal()">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="app.confirmAddStep()">+ Add Step to Chain</button>
+      </div>
+    </div>
+  </div>
 
     </main>
   </div>

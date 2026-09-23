@@ -1603,3 +1603,244 @@ input:checked + .slider:before {
   max-width: 180px;
 }
 
+/* ==========================================================================
+   TEST METHODOLOGY & EXECUTION CHAIN DESIGNER
+   ========================================================================== */
+
+.methodology-designer-card {
+  border: 1px solid rgba(6, 182, 212, 0.25);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.75), rgba(10, 15, 30, 0.85));
+}
+
+.preset-pill-group {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.methodology-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  margin-top: 0.5rem;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.methodology-setting-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.methodology-chain-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.methodology-step-card {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.9rem 1.1rem;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.methodology-step-card:hover {
+  border-color: rgba(6, 182, 212, 0.4);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+}
+
+.methodology-step-card.disabled-step {
+  opacity: 0.5;
+  filter: grayscale(0.6);
+}
+
+.methodology-step-card.type-tcp_ping {
+  border-left: 4px solid var(--accent-cyan);
+}
+
+.methodology-step-card.type-tls_handshake {
+  border-left: 4px solid var(--accent-purple);
+}
+
+.methodology-step-card.type-http_delay {
+  border-left: 4px solid var(--accent-emerald);
+}
+
+.step-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.step-badge-priority {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.2rem 0.55rem;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  border: 1px solid var(--border-subtle);
+}
+
+.step-meta-left {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.step-meta-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.step-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.step-params-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.step-param-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.step-param-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.step-param-input {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: #fff;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
+}
+
+.step-param-input:focus {
+  border-color: var(--accent-cyan);
+  outline: none;
+}
+
+.step-badge-necessary {
+  font-size: 0.72rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.step-badge-optional {
+  font-size: 0.72rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background: rgba(148, 163, 184, 0.12);
+  color: #cbd5e1;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  font-weight: 500;
+}
+
+.step-badge-primary {
+  font-size: 0.72rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background: rgba(16, 185, 129, 0.15);
+  color: #6ee7b7;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  font-weight: 600;
+}
+
+.step-connector-flow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.step-connector-line {
+  height: 1px;
+  width: 40px;
+  background: var(--border-subtle);
+}
+
+.step-connector-arrow {
+  color: var(--accent-cyan);
+  font-weight: 700;
+}
+
+/* Step Type Selector in Modal */
+.step-type-selector {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.75rem;
+}
+
+.step-type-card {
+  padding: 0.75rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: rgba(15, 23, 42, 0.5);
+  cursor: pointer;
+  transition: all 0.2s;
+  display: block;
+}
+
+.step-type-card:hover {
+  border-color: var(--accent-cyan);
+  background: rgba(6, 182, 212, 0.08);
+}
+
+.step-type-card input {
+  margin-bottom: 0.35rem;
+}
+
+.step-type-title {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #fff;
+}
+
+.step-type-desc {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-top: 0.2rem;
+}
+

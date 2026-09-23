@@ -174,9 +174,18 @@ Velox stores all engine, pipeline, ingestion, proxy, storage, web, and system ev
 
 ---
 
-## 🎯 Real-World Delay Benchmarking
+## 🎯 Configurable Test Methodology & Execution Chain
 
-Velox avoids misleading ICMP ping tests by measuring the **Time to First Byte (TTFB)** of real HTTP requests routed through each proxy node. The Web Dashboard includes one-click presets:
+Benchmarking in Velox is fully transparent and user-defined rather than a fixed black-box flow:
+
+- **Sequential Stage Chaining**: Assemble any custom sequence of `TCP Port Ping`, `TLS / REALITY Handshake`, and `HTTP Delay Toward URL`.
+- **Early Disqualification ("Necessary" Filter)**: Any stage can be marked as **Necessary (Hard Filter)**. If a proxy node fails a necessary test, it is immediately eliminated from the survivor pool, saving network I/O by skipping subsequent expensive stages.
+- **Normalized Composite Score**: Whether running a single test (e.g. direct HTTP delay) or an ordered sequence (TCP Ping + Delay), Velox assigns a single normalized score per node (`primary_test` or `weighted_average` mode).
+- **One-Click Presets**:
+  - `Standard (3-Stage)`: Ping (Necessary) → TLS Handshake → HTTP Real Delay (Necessary & Primary).
+  - `Direct URL Only`: Pure direct HTTP delay toward target endpoint.
+  - `TCP Ping Only`: Fast TCP reachability check.
+  - `Deep Verification`: Strict verification with weighted latency blending.
 
 | Destination Preset | Target URL | Use Case |
 | :--- | :--- | :--- |

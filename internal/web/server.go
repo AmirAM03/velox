@@ -141,6 +141,9 @@ func (s *Server) Start(ctx context.Context, openBrowser bool) error {
 	mux.HandleFunc("/api/rotation/pool/add-working", s.handleRotationPoolAddWorking)
 	mux.HandleFunc("/api/rotation/pool/clear", s.handleRotationPoolClear)
 
+	// Benchmark Methodology Chain API
+	mux.HandleFunc("/api/benchmark/methodology", s.handleBenchmarkMethodology)
+
 	// Start background auto-rotation engine
 	if s.rotationMgr != nil {
 		s.rotationMgr.Start(ctx)
@@ -1056,5 +1059,42 @@ func (s *Server) handleRotationPoolClear(w http.ResponseWriter, r *http.Request)
 		"total":   0,
 		"working": 0,
 	})
+}
+
+// API: Get or Save Benchmark Methodology Chain
+func (s *Server) handleBenchmarkMethodology(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		chain, err := s.store.GetBenchmarkMethodology()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"chain":   chain,
+		})
+	case http.MethodPost:
+		var chain model.BenchmarkMethodologyChain
+		if err := json.NewDecoder(r.Body).Decode(&chain); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+			return
+		}
+		if err := chain.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := s.store.SaveBenchmarkMethodology(&chain); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.jobMgr.Log("info", "methodology", fmt.Sprintf("Updated benchmark methodology: %d steps, scoring_mode=%s", len(chain.Steps), chain.ScoringMode))
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"chain":   chain,
+		})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
 }
 
