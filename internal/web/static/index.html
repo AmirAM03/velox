@@ -435,203 +435,203 @@
 
       <!-- 4. BENCHMARK VIEW -->
       <section id="tab-benchmark" class="tab-pane">
-        <div class="dashboard-header">
-          <div>
-            <h1 class="page-title">Speed & Latency Benchmark</h1>
-            <p class="page-subtitle">3-Stage concurrent pipeline test with real-time telemetry streaming</p>
-          </div>
-          <div class="actions-group">
-            <span id="benchmark-header-status" class="status-pill idle">
-              <span class="status-dot"></span>
-              <span id="benchmark-header-text">Ready</span>
-            </span>
-          </div>
-        <!-- Test Methodology & Execution Chain Designer -->
-        <div class="glass-card mb-4 methodology-designer-card">
-          <div class="card-header pb-2 flex-wrap">
+        <div class="glass-card benchmark-master-card">
+          <!-- Master Header -->
+          <div class="benchmark-master-header">
             <div>
               <div class="flex-align gap-2">
-                <h3 class="card-title">Test Methodology & Execution Chain</h3>
-                <span class="badge badge-cyan" id="methodology-steps-count">3 Steps Configured</span>
+                <h1 class="page-title mb-0">Speed & Latency Benchmark</h1>
+                <span id="benchmark-header-status" class="status-pill idle">
+                  <span class="status-dot"></span>
+                  <span id="benchmark-header-text">Ready</span>
+                </span>
+                <span class="badge badge-cyan" id="methodology-steps-count">3 Steps Active</span>
               </div>
-              <p class="page-subtitle text-xs mt-1">Configure test stages, execution sequence, timeouts, necessity filters, and normalized scoring</p>
+              <p class="page-subtitle text-xs mt-1">High-performance parallel testing with real-time telemetry streaming</p>
             </div>
-            <div class="actions-group flex-wrap">
-              <div class="preset-pill-group">
-                <span class="text-xs text-muted mr-1">Presets:</span>
-                <button type="button" class="btn btn-secondary btn-sm" onclick="app.applyMethodologyPreset('standard')">Standard (3-Stage)</button>
-                <button type="button" class="btn btn-secondary btn-sm" onclick="app.applyMethodologyPreset('url_only')">Direct URL Only</button>
-                <button type="button" class="btn btn-secondary btn-sm" onclick="app.applyMethodologyPreset('tcp_only')">TCP Ping Only</button>
-                <button type="button" class="btn btn-secondary btn-sm" onclick="app.applyMethodologyPreset('deep')">Deep Verification</button>
-              </div>
-              <button id="btn-add-methodology-step" class="btn btn-secondary btn-sm" onclick="app.openAddStepModal()">
-                <span>+ Add Step</span>
+
+            <div class="benchmark-header-actions">
+              <button id="btn-toggle-benchmark-settings" class="btn btn-secondary btn-sm" onclick="app.toggleBenchmarkSettings()">
+                <span>⚙️ Methodology & Settings</span>
+                <span id="benchmark-settings-chevron">▼</span>
               </button>
-              <button id="btn-save-methodology" class="btn btn-primary btn-sm" onclick="app.saveMethodology()">
-                <span>💾 Save Methodology</span>
-              </button>
+              <button id="btn-start-benchmark" class="btn btn-primary">⚡ Start Parallel Benchmark</button>
+              <button id="btn-cancel-benchmark" class="btn btn-danger hidden">🛑 Cancel Benchmark</button>
             </div>
           </div>
 
-          <!-- Methodology Global Settings Bar -->
-          <div class="methodology-bar">
-            <div class="methodology-setting-item">
-              <label class="text-xs text-muted font-bold" for="methodology-scoring-mode">Final Score Calculation Mode:</label>
-              <select id="methodology-scoring-mode" class="form-select select-sm" onchange="app.onScoringModeChange(this.value)">
-                <option value="primary_test">Primary Test Latency (Hard-filtered by Necessary tests)</option>
-                <option value="weighted_average">Weighted Average (Blend latency across stages by weights)</option>
-              </select>
-            </div>
-            <div class="methodology-info-note text-xs text-muted">
-              <span>💡 <strong>Necessary Filter:</strong> Failing a necessary test immediately disqualifies the node, skipping remaining stages and marking score as Failed.</span>
-            </div>
-          </div>
-
-          <!-- Dynamic Steps Chain -->
-          <div id="methodology-steps-container" class="methodology-chain-list mt-3">
-            <!-- Dynamically populated step cards -->
-          </div>
-        </div>
-
-        <div class="benchmark-grid">
-          <!-- Benchmark Configuration -->
-          <div class="glass-card benchmark-cfg-card">
-            <h3 class="card-title mb-3">Target & Concurrency Settings</h3>
-            
-            <div class="form-group mb-3">
-              <label class="form-label">Destination URL Presets</label>
-              <div class="target-presets" id="benchmark-presets-container">
-                <button class="btn btn-sm btn-secondary preset-btn active" data-url="https://www.google.com/generate_204" title="Google fast 204 connectivity test">🌐 Google (204)</button>
-                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://www.google.com" title="Google Search main page">🔍 Google Web</button>
-                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://cp.cloudflare.com/generate_204" title="Cloudflare global edge 204">⚡ Cloudflare (204)</button>
-                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://www.cloudflare.com/cdn-cgi/trace" title="Cloudflare edge trace & diagnostics">☁️ CF Trace</button>
-                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://www.youtube.com/generate_204" title="YouTube video CDN check">📺 YouTube</button>
-                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://github.com" title="GitHub web endpoint">🐙 GitHub</button>
-                <button class="btn btn-sm btn-secondary preset-btn" data-url="https://www.gstatic.com/generate_204" title="Android / Chrome captive portal check">📶 GStatic</button>
-              </div>
-            </div>
-
-            <div class="form-group mb-3">
-              <label class="form-label" for="benchmark-target-input">Target URL</label>
-              <input type="url" id="benchmark-target-input" class="form-input" value="https://www.google.com/generate_204" placeholder="https://www.google.com/generate_204">
-              <span class="text-muted text-xs mt-1">Accepts any destination URL. Real round-trip delay (TTFB) is measured through each node.</span>
-            </div>
-
-            <div class="form-group mb-3">
-              <label class="form-label" for="benchmark-scope-select">Benchmark Scope</label>
-              <select id="benchmark-scope-select" class="form-input">
-                <option value="all">All Configurations in Database</option>
-                <option value="untested">Untested Nodes Only</option>
-                <option value="top100">Top 100 Stored Nodes</option>
-                <option value="top500">Top 500 Stored Nodes</option>
-              </select>
-            </div>
-
-            <div class="form-group mb-3">
-              <label class="form-label" for="benchmark-proto-select">Protocol Filter</label>
-              <select id="benchmark-proto-select" class="form-input">
-                <option value="">All Supported Protocols (VLESS, Trojan, VMess, SS)</option>
-                <option value="vless">VLESS only</option>
-                <option value="trojan">Trojan only</option>
-                <option value="vmess">VMess only</option>
-                <option value="shadowsocks">Shadowsocks only</option>
-              </select>
-            </div>
-
-            <div class="form-group mb-4">
-              <div class="flex-between mb-1">
-                <label class="form-label mb-0" for="benchmark-threads-input">Parallel Threads / Concurrency</label>
-                <span id="threads-indicator-label" class="text-xs font-mono text-cyan">100 Threads</span>
-              </div>
-              <div class="input-with-chips">
-                <input type="number" id="benchmark-threads-input" class="form-input" value="100" min="1" max="1000">
-                <div class="thread-chips-group mt-2">
-                  <button type="button" class="chip-btn" data-threads="50">50</button>
-                  <button type="button" class="chip-btn active" data-threads="100">100 (Default)</button>
-                  <button type="button" class="chip-btn" data-threads="200">200</button>
-                  <button type="button" class="chip-btn" data-threads="500">500 (Max Speed)</button>
+          <!-- Quick Parameters Toolbar (Single Source of Truth, No Duplicates) -->
+          <div class="benchmark-quick-toolbar">
+            <!-- Target URL & Presets -->
+            <div class="toolbar-item target-url-item">
+              <div class="toolbar-label-row">
+                <label class="text-xs font-bold text-muted" for="benchmark-target-input">Target URL (Delay Endpoint):</label>
+                <div class="target-presets inline-presets" id="benchmark-presets-container">
+                  <button type="button" class="btn btn-xs btn-secondary preset-btn active" data-url="https://www.google.com/generate_204" title="Google fast 204 connectivity test">🌐 Google (204)</button>
+                  <button type="button" class="btn btn-xs btn-secondary preset-btn" data-url="https://www.google.com" title="Google Search main page">🔍 Google Web</button>
+                  <button type="button" class="btn btn-xs btn-secondary preset-btn" data-url="https://cp.cloudflare.com/generate_204" title="Cloudflare edge 204">⚡ Cloudflare (204)</button>
+                  <button type="button" class="btn btn-xs btn-secondary preset-btn" data-url="https://www.cloudflare.com/cdn-cgi/trace" title="Cloudflare trace">☁️ CF Trace</button>
+                  <button type="button" class="btn btn-xs btn-secondary preset-btn" data-url="https://www.youtube.com/generate_204" title="YouTube video CDN">📺 YouTube</button>
+                  <button type="button" class="btn btn-xs btn-secondary preset-btn" data-url="https://github.com" title="GitHub">🐙 GitHub</button>
                 </div>
               </div>
-              <span class="text-muted text-xs mt-1">Multi-worker concurrency for DNS, TLS handshakes, and in-process proxy TTFB measurements.</span>
+              <input type="url" id="benchmark-target-input" class="form-input input-sm mt-1" value="https://www.google.com/generate_204" placeholder="https://www.google.com/generate_204">
             </div>
 
-            <div class="benchmark-actions-row">
-              <button id="btn-start-benchmark" class="btn btn-primary w-full">⚡ Start Parallel Benchmark</button>
-              <button id="btn-cancel-benchmark" class="btn btn-danger w-full hidden">🛑 Cancel Benchmark</button>
+            <!-- Scope & Protocol Filters -->
+            <div class="toolbar-item scope-proto-item">
+              <div class="form-row gap-2">
+                <div style="flex: 1;">
+                  <label class="text-xs font-bold text-muted" for="benchmark-scope-select">Scope:</label>
+                  <select id="benchmark-scope-select" class="form-select select-sm mt-1 w-full">
+                    <option value="all">All Configurations</option>
+                    <option value="untested">Untested Nodes Only</option>
+                    <option value="top100">Top 100 Stored Nodes</option>
+                    <option value="top500">Top 500 Stored Nodes</option>
+                  </select>
+                </div>
+                <div style="flex: 1;">
+                  <label class="text-xs font-bold text-muted" for="benchmark-proto-select">Protocol:</label>
+                  <select id="benchmark-proto-select" class="form-select select-sm mt-1 w-full">
+                    <option value="">All Protocols</option>
+                    <option value="vless">VLESS</option>
+                    <option value="trojan">Trojan</option>
+                    <option value="vmess">VMess</option>
+                    <option value="shadowsocks">Shadowsocks</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <!-- Parallel Threads -->
+            <div class="toolbar-item threads-item">
+              <div class="flex-between">
+                <label class="text-xs font-bold text-muted" for="benchmark-threads-input">Parallel Threads:</label>
+                <span id="threads-indicator-label" class="text-xs font-mono text-cyan">100 Threads</span>
+              </div>
+              <div class="input-with-chips mt-1">
+                <div class="thread-chips-group inline-thread-chips">
+                  <button type="button" class="chip-btn chip-xs" data-threads="50">50</button>
+                  <button type="button" class="chip-btn chip-xs active" data-threads="100">100</button>
+                  <button type="button" class="chip-btn chip-xs" data-threads="200">200</button>
+                  <button type="button" class="chip-btn chip-xs" data-threads="500">500</button>
+                </div>
+                <input type="number" id="benchmark-threads-input" class="form-input input-sm thread-num-input" value="100" min="1" max="1000">
+              </div>
             </div>
           </div>
 
-          <!-- Benchmark Live Progress & Streaming Table -->
-          <div class="glass-card benchmark-live-card">
-            <div class="card-header pb-2">
-              <div>
-                <h3 class="card-title">Live Telemetry & Real-Time Stream</h3>
-                <span id="benchmark-stage-label" class="text-xs text-muted">Ready to test</span>
+          <!-- Managed Settings & Pipeline Methodology Section (Collapsible Accordion / Drawer) -->
+          <div id="benchmark-settings-panel" class="benchmark-settings-drawer hidden">
+            <div class="settings-drawer-inner">
+              <div class="settings-drawer-header">
+                <div>
+                  <h3 class="card-title text-base">Pipeline Methodology & Scoring Strategy</h3>
+                  <p class="text-muted text-xs mt-1">Configure test stages, execution sequence, timeouts, necessity filters, and normalized scoring</p>
+                </div>
+                <div class="actions-group flex-wrap">
+                  <div class="preset-pill-group">
+                    <span class="text-xs text-muted mr-1">Presets:</span>
+                    <button type="button" class="btn btn-secondary btn-xs" onclick="app.applyMethodologyPreset('standard')">Standard (3-Stage)</button>
+                    <button type="button" class="btn btn-secondary btn-xs" onclick="app.applyMethodologyPreset('url_only')">Direct URL Only</button>
+                    <button type="button" class="btn btn-secondary btn-xs" onclick="app.applyMethodologyPreset('tcp_only')">TCP Ping Only</button>
+                    <button type="button" class="btn btn-secondary btn-xs" onclick="app.applyMethodologyPreset('deep')">Deep Verification</button>
+                  </div>
+                  <button id="btn-add-methodology-step" class="btn btn-secondary btn-xs" onclick="app.openAddStepModal()">
+                    <span>+ Add Step</span>
+                  </button>
+                  <button id="btn-save-methodology" class="btn btn-primary btn-xs" onclick="app.saveMethodology()">
+                    <span>💾 Save Methodology</span>
+                  </button>
+                </div>
               </div>
-              <div class="status-tags">
-                <span id="benchmark-status-badge" class="badge">Idle</span>
+
+              <!-- Methodology Bar -->
+              <div class="methodology-bar mt-2 mb-3">
+                <div class="methodology-setting-item">
+                  <label class="text-xs text-muted font-bold" for="methodology-scoring-mode">Score Mode:</label>
+                  <select id="methodology-scoring-mode" class="form-select select-sm" onchange="app.onScoringModeChange(this.value)">
+                    <option value="primary_test">Primary Test Latency (Hard-filtered by Necessary tests)</option>
+                    <option value="weighted_average">Weighted Average (Blend latency across stages by weights)</option>
+                  </select>
+                </div>
+                <div class="methodology-info-note text-xs text-muted">
+                  <span>💡 <strong>Necessary Filter:</strong> If marked Necessary fails on a node, that node is immediately disqualified and skips subsequent stages.</span>
+                </div>
+              </div>
+
+              <!-- Dynamic Steps Chain -->
+              <div id="methodology-steps-container" class="methodology-chain-list">
+                <!-- Dynamically populated step cards -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Live Progress & Stage Banner -->
+          <div class="benchmark-progress-section mt-3">
+            <div class="progress-header-row mb-2">
+              <div class="flex-align gap-2">
+                <span class="font-bold text-sm">Testing Progress:</span>
+                <span id="benchmark-stage-label" class="text-xs text-cyan font-mono">Ready to test</span>
+              </div>
+              <div class="flex-align gap-2">
+                <span id="benchmark-progress-pct" class="text-xs font-mono font-bold text-emerald">0%</span>
+                <span id="benchmark-progress-counts" class="text-xs text-muted font-mono">(0 / 0 nodes)</span>
               </div>
             </div>
 
-            <!-- Progress Bar -->
-            <div class="progress-container mb-3" id="benchmark-progress-container">
-              <div class="progress-bar-track">
-                <div id="benchmark-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
-              </div>
-              <div class="progress-meta mt-1">
-                <span id="benchmark-progress-pct" class="text-xs font-mono">0%</span>
-                <span id="benchmark-progress-counts" class="text-xs text-muted font-mono">0 / 0 nodes</span>
-              </div>
+            <div class="progress-bar-track">
+              <div id="benchmark-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
             </div>
+          </div>
 
-            <!-- Live Stats Row -->
-            <div class="live-stats-row mb-3">
-              <div class="live-stat-pill">
-                <span class="pill-label">Total</span>
-                <span id="stat-live-total" class="pill-val">0</span>
-              </div>
-              <div class="live-stat-pill">
-                <span class="pill-label">Tested</span>
-                <span id="stat-live-tested" class="pill-val">0</span>
-              </div>
-              <div class="live-stat-pill success">
-                <span class="pill-label">Working</span>
-                <span id="stat-live-passed" class="pill-val">0</span>
-              </div>
-              <div class="live-stat-pill danger">
-                <span class="pill-label">Failed</span>
-                <span id="stat-live-failed" class="pill-val">0</span>
-              </div>
-              <div class="live-stat-pill cyan">
-                <span class="pill-label">Fastest</span>
-                <span id="stat-live-fastest" class="pill-val">— ms</span>
-              </div>
+          <!-- Live Telemetry KPI Metrics Strip -->
+          <div class="live-stats-row my-3">
+            <div class="live-stat-pill">
+              <span class="pill-label">Total</span>
+              <span id="stat-live-total" class="pill-val">0</span>
             </div>
+            <div class="live-stat-pill">
+              <span class="pill-label">Tested</span>
+              <span id="stat-live-tested" class="pill-val">0</span>
+            </div>
+            <div class="live-stat-pill success">
+              <span class="pill-label">Working</span>
+              <span id="stat-live-passed" class="pill-val">0</span>
+            </div>
+            <div class="live-stat-pill danger">
+              <span class="pill-label">Failed</span>
+              <span id="stat-live-failed" class="pill-val">0</span>
+            </div>
+            <div class="live-stat-pill cyan">
+              <span class="pill-label">Fastest Latency</span>
+              <span id="stat-live-fastest" class="pill-val">— ms</span>
+            </div>
+          </div>
 
-            <!-- Live Streaming Results Table -->
-            <div class="table-responsive live-table-wrap">
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>Status</th>
-                    <th>Proto</th>
-                    <th>Name</th>
-                    <th>Endpoint</th>
-                    <th>Latency</th>
-                    <th>Stage / Error</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody id="benchmark-live-tbody">
-                  <tr>
-                    <td colspan="7" class="text-muted text-center py-5">
-                      <div class="empty-icon text-2xl mb-1">⏱️</div>
-                      No benchmark running. Configure settings on the left and click "Start Parallel Benchmark" to watch live streaming node tests.
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+          <!-- Full-Width Live Streaming Results Table -->
+          <div class="table-responsive live-table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width: 80px;">Status</th>
+                  <th style="width: 85px;">Proto</th>
+                  <th>Node Remark / Name</th>
+                  <th>Endpoint</th>
+                  <th style="width: 95px;">Latency</th>
+                  <th>Stage / Verification Outcome</th>
+                  <th style="width: 100px;">Action</th>
+                </tr>
+              </thead>
+              <tbody id="benchmark-live-tbody">
+                <tr>
+                  <td colspan="7" class="text-muted text-center py-5">
+                    <div class="empty-icon text-2xl mb-1">⏱️</div>
+                    No benchmark running. Click "Start Parallel Benchmark" to watch live streaming node tests.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </section>

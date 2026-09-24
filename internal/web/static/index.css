@@ -1844,3 +1844,312 @@ input:checked + .slider:before {
   margin-top: 0.2rem;
 }
 
+/* ==========================================================================
+   UNIFIED BENCHMARK MASTER VIEW & SETTINGS DRAWER
+   ========================================================================== */
+
+.benchmark-master-card {
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.benchmark-master-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.benchmark-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+#benchmark-settings-chevron {
+  font-size: 0.75rem;
+  margin-left: 0.35rem;
+  display: inline-block;
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+#btn-toggle-benchmark-settings.active {
+  background: rgba(6, 182, 212, 0.18);
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+/* Quick Parameters Toolbar */
+.benchmark-quick-toolbar {
+  display: flex;
+  gap: 1.25rem;
+  background: rgba(10, 15, 26, 0.55);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.25rem;
+  flex-wrap: wrap;
+}
+
+.toolbar-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.target-url-item {
+  flex: 1.6;
+  min-width: 320px;
+}
+
+.scope-proto-item {
+  flex: 1.1;
+  min-width: 250px;
+}
+
+.threads-item {
+  flex: 0.9;
+  min-width: 210px;
+}
+
+.toolbar-label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.25rem;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.inline-presets {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.input-with-chips {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.inline-thread-chips {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.chip-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.2s;
+  font-weight: 500;
+  font-family: var(--font-mono);
+}
+
+.chip-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.chip-btn.active {
+  background: rgba(6, 182, 212, 0.2);
+  color: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 10px rgba(6, 182, 212, 0.2);
+}
+
+.chip-xs {
+  font-size: 0.72rem;
+  padding: 0.25rem 0.55rem;
+}
+
+.thread-num-input {
+  width: 75px !important;
+  text-align: center;
+}
+
+/* Collapsible Settings Drawer */
+.benchmark-settings-drawer {
+  background: rgba(13, 18, 29, 0.85);
+  border: 1px solid rgba(6, 182, 212, 0.25);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  animation: fadeInDown 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  overflow: hidden;
+}
+
+.benchmark-settings-drawer.hidden {
+  display: none !important;
+}
+
+@keyframes fadeInDown {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.settings-drawer-inner {
+  padding: 1.25rem;
+}
+
+.settings-drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.preset-pill-group {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+/* Synchronized Target URL badge in Methodology Step */
+.step-param-sync-text {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(6, 182, 212, 0.08);
+  border: 1px dashed rgba(6, 182, 212, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 0.35rem 0.65rem;
+  color: var(--accent-cyan);
+  font-size: 0.8rem;
+  min-height: 32px;
+}
+
+.step-param-sync-text .icon {
+  font-size: 0.85rem;
+  color: var(--accent-cyan);
+}
+
+.step-target-sync-url {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: #e2e8f0;
+}
+
+/* Live Progress & Stats Strip */
+.benchmark-progress-section {
+  background: rgba(10, 15, 26, 0.4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1.15rem;
+}
+
+.progress-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.progress-bar-track {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-cyan), var(--accent-emerald));
+  border-radius: var(--radius-full);
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.4);
+}
+
+.live-stats-row {
+  display: flex;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.live-stat-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  padding: 0.3rem 0.85rem;
+  font-size: 0.8rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.live-stat-pill .pill-label {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+
+.live-stat-pill .pill-val {
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: #fff;
+}
+
+.live-stat-pill.success {
+  border-color: rgba(16, 185, 129, 0.3);
+  background: rgba(16, 185, 129, 0.08);
+}
+.live-stat-pill.success .pill-val {
+  color: var(--accent-emerald);
+}
+
+.live-stat-pill.danger {
+  border-color: rgba(244, 63, 94, 0.3);
+  background: rgba(244, 63, 94, 0.08);
+}
+.live-stat-pill.danger .pill-val {
+  color: var(--accent-rose);
+}
+
+.live-stat-pill.cyan {
+  border-color: rgba(6, 182, 212, 0.3);
+  background: rgba(6, 182, 212, 0.08);
+}
+.live-stat-pill.cyan .pill-val {
+  color: var(--accent-cyan);
+}
+
+/* Full-width live table wrapper with sticky header and scroll */
+.live-table-wrap {
+  max-height: 480px;
+  overflow-y: auto;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: rgba(10, 15, 26, 0.45);
+}
+
+.live-table-wrap table thead th {
+  position: sticky;
+  top: 0;
+  background: rgba(13, 18, 29, 0.95);
+  backdrop-filter: blur(8px);
+  z-index: 2;
+  box-shadow: 0 1px 0 var(--border-subtle);
+}
+
+

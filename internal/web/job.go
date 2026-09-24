@@ -266,7 +266,7 @@ func (m *BenchmarkJobManager) runPipeline(ctx context.Context, configs []*model.
 	// If a custom target was supplied in run options, apply it to HTTP delay steps
 	if strings.TrimSpace(target) != "" {
 		for i := range chain.Steps {
-			if chain.Steps[i].Type == model.MethodologyHTTPDelay && (chain.Steps[i].TargetURL == "" || len(chain.Steps) == 1) {
+			if chain.Steps[i].Type == model.MethodologyHTTPDelay {
 				chain.Steps[i].TargetURL = target
 			}
 		}

@@ -221,8 +221,20 @@ const app = {
         document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         const input = document.getElementById('benchmark-target-input');
-        if (input) input.value = btn.dataset.url;
+        if (input) {
+          input.value = btn.dataset.url;
+          this.syncTargetURLToMethodology(btn.dataset.url);
+        }
       });
+    });
+
+    // Benchmark Target Input Manual Input
+    document.getElementById('benchmark-target-input')?.addEventListener('input', (e) => {
+      const url = e.target.value.trim();
+      document.querySelectorAll('.preset-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.url === url);
+      });
+      this.syncTargetURLToMethodology(url);
     });
 
     // Benchmark Parallel Threads Chips
@@ -1755,6 +1767,40 @@ const app = {
   // TEST METHODOLOGY & EXECUTION CHAIN
   // ==========================================================================
 
+  toggleBenchmarkSettings() {
+    const panel = document.getElementById('benchmark-settings-panel');
+    const chevron = document.getElementById('benchmark-settings-chevron');
+    const btn = document.getElementById('btn-toggle-benchmark-settings');
+    if (!panel) return;
+
+    const isHidden = panel.classList.contains('hidden');
+    if (isHidden) {
+      panel.classList.remove('hidden');
+      if (chevron) chevron.textContent = '▲';
+      if (btn) btn.classList.add('active');
+    } else {
+      panel.classList.add('hidden');
+      if (chevron) chevron.textContent = '▼';
+      if (btn) btn.classList.remove('active');
+    }
+  },
+
+  syncTargetURLToMethodology(url) {
+    if (!url || !this.state.methodology || !this.state.methodology.steps) return;
+    let modified = false;
+    this.state.methodology.steps.forEach(step => {
+      if (step.type === 'http_delay') {
+        step.target_url = url;
+        modified = true;
+      }
+    });
+    if (modified) {
+      document.querySelectorAll('.step-target-sync-url').forEach(el => {
+        el.textContent = url;
+      });
+    }
+  },
+
   async loadMethodology() {
     try {
       const res = await fetch('/api/benchmark/methodology');
@@ -1762,6 +1808,14 @@ const app = {
       const data = await res.json();
       if (data.chain) {
         this.state.methodology = data.chain;
+        const httpStep = (data.chain.steps || []).find(s => s.type === 'http_delay' && s.target_url);
+        if (httpStep && httpStep.target_url) {
+          const targetInput = document.getElementById('benchmark-target-input');
+          if (targetInput) targetInput.value = httpStep.target_url;
+          document.querySelectorAll('.preset-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.url === httpStep.target_url);
+          });
+        }
         this.renderMethodology();
       }
     } catch (e) {
@@ -1797,6 +1851,8 @@ const app = {
     // Sort by priority before rendering
     chain.steps.sort((a, b) => (a.priority || 0) - (b.priority || 0));
 
+    const currentTargetURL = document.getElementById('benchmark-target-input')?.value.trim() || 'https://www.google.com/generate_204';
+
     let html = '';
     chain.steps.forEach((step, idx) => {
       const isFirst = idx === 0;
@@ -1821,11 +1877,19 @@ const app = {
         ? `<span class="step-badge-primary">★ Primary Score</span>`
         : '';
 
+      if (step.type === 'http_delay' && !step.target_url) {
+        step.target_url = currentTargetURL;
+      }
+
       const targetField = step.type === 'http_delay'
         ? `
           <div class="step-param-item" style="grid-column: span 2;">
-            <label class="step-param-label">Target URL</label>
-            <input type="text" class="step-param-input" value="${this.escapeHtml(step.target_url || 'https://www.google.com/generate_204')}" onchange="app.updateMethodologyStep(${idx}, 'target_url', this.value)">
+            <label class="step-param-label">Target URL (Bound to Quick Toolbar)</label>
+            <div class="step-param-sync-text" title="Target URL is configured centrally in the toolbar above">
+              <span class="icon">🔗</span>
+              <span class="text-mono truncate step-target-sync-url">${this.escapeHtml(step.target_url || currentTargetURL)}</span>
+              <span class="badge badge-xs badge-cyan ml-auto">Synced</span>
+            </div>
           </div>
           <div class="step-param-item">
             <label class="step-param-label">Expected Codes (CSV)</label>
@@ -1974,7 +2038,14 @@ const app = {
 
   openAddStepModal() {
     const modal = document.getElementById('modal-add-step');
-    if (modal) modal.classList.remove('hidden');
+    if (modal) {
+      modal.classList.remove('hidden');
+      const targetInput = document.getElementById('new-step-target');
+      const currentTarget = document.getElementById('benchmark-target-input')?.value.trim();
+      if (targetInput && currentTarget) {
+        targetInput.value = currentTarget;
+      }
+    }
   },
 
   closeAddStepModal() {
@@ -2004,7 +2075,7 @@ const app = {
     const timeoutInput = document.getElementById('new-step-timeout');
     const timeoutMS = timeoutInput ? parseInt(timeoutInput.value, 10) || 3000 : 3000;
     const targetInput = document.getElementById('new-step-target');
-    const targetURL = targetInput ? targetInput.value.trim() : 'https://www.google.com/generate_204';
+    const targetURL = targetInput ? targetInput.value.trim() : (document.getElementById('benchmark-target-input')?.value.trim() || 'https://www.google.com/generate_204');
     const necessaryCheck = document.getElementById('new-step-necessary');
     const necessary = necessaryCheck ? necessaryCheck.checked : true;
 
@@ -2032,6 +2103,7 @@ const app = {
   async applyMethodologyPreset(preset) {
     let steps = [];
     let scoringMode = 'primary_test';
+    const currentTarget = document.getElementById('benchmark-target-input')?.value.trim() || 'https://www.google.com/generate_204';
 
     switch (preset) {
       case 'url_only':
@@ -2047,7 +2119,7 @@ const app = {
             weight: 1.0,
             is_primary: true,
             timeout_ms: 7000,
-            target_url: 'https://www.google.com/generate_204',
+            target_url: currentTarget,
             expect_codes: [200, 204]
           }
         ];
@@ -2109,7 +2181,7 @@ const app = {
             weight: 0.5,
             is_primary: true,
             timeout_ms: 8000,
-            target_url: 'https://www.google.com/generate_204',
+            target_url: currentTarget,
             expect_codes: [200, 204]
           }
         ];
@@ -2154,7 +2226,7 @@ const app = {
             weight: 0.6,
             is_primary: true,
             timeout_ms: 7000,
-            target_url: 'https://www.google.com/generate_204',
+            target_url: currentTarget,
             expect_codes: [200, 204]
           }
         ];
