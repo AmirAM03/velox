@@ -19,23 +19,26 @@ import (
 
 // RotationHistoryEntry documents a single auto-rotation switch.
 type RotationHistoryEntry struct {
-	Timestamp time.Time `json:"timestamp"`
-	FromNode  string    `json:"from_node"`
-	ToNode    string    `json:"to_node"`
-	ToNodeID  string    `json:"to_node_id"`
-	Protocol  string    `json:"protocol"`
-	LatencyMS float64   `json:"latency_ms"`
-	Score     float64   `json:"score"`
-	Reason    string    `json:"reason"`
+	Timestamp   time.Time `json:"timestamp"`
+	TriggerType string    `json:"trigger_type"` // "periodic" or "signal"
+	FromNode    string    `json:"from_node"`
+	ToNode      string    `json:"to_node"`
+	ToNodeID    string    `json:"to_node_id"`
+	Protocol    string    `json:"protocol"`
+	LatencyMS   float64   `json:"latency_ms"`
+	Score       float64   `json:"score"`
+	Reason      string    `json:"reason"`
 }
 
 // RotationStatus summarizes current auto-rotation telemetry and state.
 type RotationStatus struct {
 	Enabled             bool                   `json:"enabled"`
+	Mode                string                 `json:"mode"` // "periodic" or "signal"
 	Interval            string                 `json:"interval"`
 	IntervalSeconds     int                    `json:"interval_seconds"`
 	Target              string                 `json:"target"`
 	Threads             int                    `json:"threads"`
+	MethodologySummary  string                 `json:"methodology_summary"`
 	IsBenchmarking      bool                   `json:"is_benchmarking"`
 	LastRotatedAt       *time.Time             `json:"last_rotated_at,omitempty"`
 	NextRotationAt      *time.Time             `json:"next_rotation_at,omitempty"`
@@ -58,10 +61,9 @@ type RotationManager struct {
 	broadcastEvent func(event map[string]interface{})
 
 	enabled        bool
+	mode           string // "periodic" or "signal"
 	interval       time.Duration
 	intervalStr    string
-	target         string
-	threads        int
 	isBenchmarking bool
 	lastRotatedAt  time.Time
 	nextRotationAt time.Time
@@ -70,7 +72,7 @@ type RotationManager struct {
 	history        []RotationHistoryEntry
 
 	stopCh    chan struct{}
-	triggerCh chan struct{}
+	triggerCh chan string
 }
 
 // NewRotationManager initializes the auto-rotation manager.
@@ -94,11 +96,10 @@ func NewRotationManager(
 		connectProxy:   connectProxy,
 		broadcastEvent: broadcastEvent,
 		enabled:        false,
+		mode:           "periodic",
 		interval:       15 * time.Minute,
 		intervalStr:    "15m",
-		target:         "https://www.google.com/generate_204",
-		threads:        50,
-		triggerCh:      make(chan struct{}, 1),
+		triggerCh:      make(chan string, 5),
 		history:        make([]RotationHistoryEntry, 0),
 	}
 
@@ -106,14 +107,16 @@ func NewRotationManager(
 	if en, err := store.GetSetting("rotation_enabled", "false"); err == nil && en == "true" {
 		rm.enabled = true
 	}
+	if md, err := store.GetSetting("rotation_mode", "periodic"); err == nil && md != "" {
+		if md == "signal" || md == "periodic" {
+			rm.mode = md
+		}
+	}
 	if iv, err := store.GetSetting("rotation_interval", "15m"); err == nil && iv != "" {
 		rm.intervalStr = iv
 		if dur, err := parseRotationInterval(iv); err == nil {
 			rm.interval = dur
 		}
-	}
-	if tg, err := store.GetSetting("rotation_target", ""); err == nil && tg != "" {
-		rm.target = tg
 	}
 
 	return rm
@@ -135,12 +138,12 @@ func (m *RotationManager) Start(ctx context.Context) {
 				return
 			case <-m.stopCh:
 				return
-			case <-m.triggerCh:
-				m.runCycle()
+			case triggerType := <-m.triggerCh:
+				m.runCycle(triggerType)
 			case <-ticker.C:
 				m.mu.Lock()
 				shouldRun := false
-				if m.enabled && !m.isBenchmarking {
+				if m.enabled && m.mode == "periodic" && !m.isBenchmarking {
 					if m.nextRotationAt.IsZero() || time.Now().After(m.nextRotationAt) {
 						shouldRun = true
 					}
@@ -148,7 +151,7 @@ func (m *RotationManager) Start(ctx context.Context) {
 				m.mu.Unlock()
 
 				if shouldRun {
-					m.runCycle()
+					m.runCycle("interval")
 				}
 			}
 		}
@@ -166,9 +169,17 @@ func (m *RotationManager) Stop() {
 }
 
 // Configure updates auto-rotation settings and resets timer if needed.
-func (m *RotationManager) Configure(enabled bool, intervalStr string, target string, threads int) error {
+func (m *RotationManager) Configure(enabled bool, mode string, intervalStr string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if mode != "" {
+		if mode != "periodic" && mode != "signal" {
+			mode = "periodic"
+		}
+		m.mode = mode
+		_ = m.store.SetSetting("rotation_mode", mode)
+	}
 
 	if intervalStr != "" {
 		dur, err := parseRotationInterval(intervalStr)
@@ -177,13 +188,7 @@ func (m *RotationManager) Configure(enabled bool, intervalStr string, target str
 		}
 		m.interval = dur
 		m.intervalStr = intervalStr
-	}
-
-	if target != "" {
-		m.target = target
-	}
-	if threads > 0 {
-		m.threads = threads
+		_ = m.store.SetSetting("rotation_interval", m.intervalStr)
 	}
 
 	prevEnabled := m.enabled
@@ -191,10 +196,8 @@ func (m *RotationManager) Configure(enabled bool, intervalStr string, target str
 
 	// Persist to settings
 	_ = m.store.SetSetting("rotation_enabled", fmt.Sprintf("%t", enabled))
-	_ = m.store.SetSetting("rotation_interval", m.intervalStr)
-	_ = m.store.SetSetting("rotation_target", m.target)
 
-	if enabled {
+	if enabled && m.mode == "periodic" {
 		if !prevEnabled || m.nextRotationAt.IsZero() {
 			m.nextRotationAt = time.Now() // Run immediately on enable
 		}
@@ -205,38 +208,48 @@ func (m *RotationManager) Configure(enabled bool, intervalStr string, target str
 	m.logger.Info("auto-rotation configuration updated",
 		slog.String("source", "system"),
 		slog.Bool("enabled", enabled),
+		slog.String("mode", m.mode),
 		slog.String("interval", m.intervalStr),
-		slog.String("target", m.target),
 	)
 
 	return nil
 }
 
-// TriggerNow schedules an immediate rotation cycle.
-func (m *RotationManager) TriggerNow() {
+// TriggerNow schedules an immediate rotation cycle with the given trigger type (default: "signal").
+func (m *RotationManager) TriggerNow(triggerType ...string) {
+	tt := "signal"
+	if len(triggerType) > 0 && triggerType[0] != "" {
+		tt = triggerType[0]
+	}
 	select {
-	case m.triggerCh <- struct{}{}:
+	case m.triggerCh <- tt:
 	default:
 	}
 }
 
-// runCycle runs a benchmark across all nodes in the pool and activates the best node.
-func (m *RotationManager) runCycle() {
+// runCycle runs a benchmark across all nodes in the pool using the centralized benchmark methodology and activates the best node.
+func (m *RotationManager) runCycle(triggerType string) {
+	if triggerType == "" {
+		triggerType = "interval"
+	}
 	m.mu.Lock()
 	if m.isBenchmarking {
 		m.mu.Unlock()
 		return
 	}
 	m.isBenchmarking = true
-	target := m.target
-	threads := m.threads
 	interval := m.interval
+	mode := m.mode
 	m.mu.Unlock()
 
 	defer func() {
 		m.mu.Lock()
 		m.isBenchmarking = false
-		m.nextRotationAt = time.Now().Add(interval)
+		if mode == "periodic" {
+			m.nextRotationAt = time.Now().Add(interval)
+		} else {
+			m.nextRotationAt = time.Time{}
+		}
 		m.mu.Unlock()
 		m.broadcastStatus()
 	}()
@@ -248,6 +261,7 @@ func (m *RotationManager) runCycle() {
 	if err != nil || len(poolItems) == 0 {
 		m.logger.Info("auto-rotation: pool is empty, skipping cycle",
 			slog.String("source", "system"),
+			slog.String("trigger", triggerType),
 		)
 		return
 	}
@@ -262,23 +276,50 @@ func (m *RotationManager) runCycle() {
 		return
 	}
 
-	m.logger.Info("auto-rotation cycle started: benchmarking pool",
-		slog.String("source", "system"),
-		slog.Int("pool_size", len(configs)),
-		slog.String("target", target),
-	)
-
-	// 2. Run pipeline benchmark
-	eng := engine.NewXrayEngine(m.logger)
-	defer eng.Close()
-
+	// 2. Load centralized benchmark methodology chain (Single Source of Truth)
 	chain, err := m.store.GetBenchmarkMethodology()
 	if err != nil || chain == nil {
 		chain = model.DefaultMethodologyChain()
 	}
 
-	p := pipeline.New(m.pipelineCfg, eng, []string{target}, []int{200, 204}, m.logger)
-	p.SetConcurrency(threads)
+	// Determine centralized target URL and expect codes from the chain
+	targetURL := "https://www.google.com/generate_204"
+	var expectCodes []int = []int{200, 204}
+	for _, step := range chain.Steps {
+		if step.Type == model.MethodologyHTTPDelay && strings.TrimSpace(step.TargetURL) != "" {
+			targetURL = strings.TrimSpace(step.TargetURL)
+			if len(step.ExpectCodes) > 0 {
+				expectCodes = step.ExpectCodes
+			}
+			break
+		}
+	}
+
+	// Ensure any HTTP delay step in the chain uses this target
+	for i := range chain.Steps {
+		if chain.Steps[i].Type == model.MethodologyHTTPDelay {
+			chain.Steps[i].TargetURL = targetURL
+		}
+	}
+
+	concurrency := 50
+	if m.pipelineCfg != nil && m.pipelineCfg.Stage2Workers > 0 {
+		concurrency = m.pipelineCfg.Stage2Workers
+	}
+
+	m.logger.Info("auto-rotation cycle started: benchmarking pool via centralized methodology",
+		slog.String("source", "system"),
+		slog.String("trigger", triggerType),
+		slog.Int("pool_size", len(configs)),
+		slog.String("target", targetURL),
+		slog.Int("steps", len(chain.ActiveSteps())),
+	)
+
+	eng := engine.NewXrayEngine(m.logger)
+	defer eng.Close()
+
+	p := pipeline.New(m.pipelineCfg, eng, []string{targetURL}, expectCodes, m.logger)
+	p.SetConcurrency(concurrency)
 	p.SetMethodology(chain)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -319,6 +360,7 @@ func (m *RotationManager) runCycle() {
 	if len(candidates) == 0 {
 		m.logger.Warn("auto-rotation: all nodes in rotation pool failed test",
 			slog.String("source", "system"),
+			slog.String("trigger", triggerType),
 			slog.Int("tested_nodes", len(configs)),
 		)
 		return
@@ -345,15 +387,21 @@ func (m *RotationManager) runCycle() {
 	m.lastRotatedAt = time.Now()
 	m.totalRotations++
 
+	reason := fmt.Sprintf("Scheduled rotation: best score (%.3f, %.0fms)", bestScore, bestLat)
+	if triggerType == "signal" {
+		reason = fmt.Sprintf("Signal triggered: best score (%.3f, %.0fms)", bestScore, bestLat)
+	}
+
 	entry := RotationHistoryEntry{
-		Timestamp: time.Now(),
-		FromNode:  prevName,
-		ToNode:    best.DisplayName(),
-		ToNodeID:  best.ID,
-		Protocol:  string(best.Protocol),
-		LatencyMS: bestLat,
-		Score:     bestScore,
-		Reason:    fmt.Sprintf("Best composite score (%.3f, %.0fms)", bestScore, bestLat),
+		Timestamp:   time.Now(),
+		TriggerType: triggerType,
+		FromNode:    prevName,
+		ToNode:      best.DisplayName(),
+		ToNodeID:    best.ID,
+		Protocol:    string(best.Protocol),
+		LatencyMS:   bestLat,
+		Score:       bestScore,
+		Reason:      reason,
 	}
 	m.history = append([]RotationHistoryEntry{entry}, m.history...)
 	if len(m.history) > 50 {
@@ -375,6 +423,7 @@ func (m *RotationManager) runCycle() {
 
 	m.logger.Info("auto-rotation: switched active proxy node",
 		slog.String("source", "system"),
+		slog.String("trigger", triggerType),
 		slog.String("from", prevName),
 		slog.String("to", best.DisplayName()),
 		slog.Float64("latency_ms", bestLat),
@@ -389,12 +438,36 @@ func (m *RotationManager) GetStatus() RotationStatus {
 
 	total, working, _ := m.store.GetRotationPoolStats()
 
+	// Query centralized benchmark methodology for summary
+	chain, _ := m.store.GetBenchmarkMethodology()
+	targetURL := "https://www.google.com/generate_204"
+	var stepNames []string
+	if chain != nil {
+		for _, s := range chain.ActiveSteps() {
+			stepNames = append(stepNames, s.Name)
+			if s.Type == model.MethodologyHTTPDelay && strings.TrimSpace(s.TargetURL) != "" {
+				targetURL = strings.TrimSpace(s.TargetURL)
+			}
+		}
+	}
+	methodologySummary := "Default Standard (3-Stage)"
+	if len(stepNames) > 0 {
+		methodologySummary = strings.Join(stepNames, " → ")
+	}
+
+	concurrency := 50
+	if m.pipelineCfg != nil && m.pipelineCfg.Stage2Workers > 0 {
+		concurrency = m.pipelineCfg.Stage2Workers
+	}
+
 	status := RotationStatus{
 		Enabled:             m.enabled,
+		Mode:                m.mode,
 		Interval:            m.intervalStr,
 		IntervalSeconds:     int(m.interval.Seconds()),
-		Target:              m.target,
-		Threads:             m.threads,
+		Target:              targetURL,
+		Threads:             concurrency,
+		MethodologySummary:  methodologySummary,
 		IsBenchmarking:      m.isBenchmarking,
 		ActiveNode:          m.activeNode,
 		PoolSize:            total,
@@ -408,7 +481,7 @@ func (m *RotationManager) GetStatus() RotationStatus {
 		t := m.lastRotatedAt
 		status.LastRotatedAt = &t
 	}
-	if !m.nextRotationAt.IsZero() {
+	if !m.nextRotationAt.IsZero() && m.mode == "periodic" {
 		t := m.nextRotationAt
 		status.NextRotationAt = &t
 		rem := int(time.Until(t).Seconds())

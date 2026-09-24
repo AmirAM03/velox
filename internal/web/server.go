@@ -135,6 +135,7 @@ func (s *Server) Start(ctx context.Context, openBrowser bool) error {
 	mux.HandleFunc("/api/rotation/status", s.handleRotationStatus)
 	mux.HandleFunc("/api/rotation/config", s.handleRotationConfig)
 	mux.HandleFunc("/api/rotation/trigger", s.handleRotationTrigger)
+	mux.HandleFunc("/api/rotation/signal", s.handleRotationTrigger)
 	mux.HandleFunc("/api/rotation/pool", s.handleRotationPool)
 	mux.HandleFunc("/api/rotation/pool/add", s.handleRotationPoolAdd)
 	mux.HandleFunc("/api/rotation/pool/remove", s.handleRotationPoolRemove)
@@ -897,29 +898,39 @@ func (s *Server) handleRotationConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Enabled  bool   `json:"enabled"`
+		Mode     string `json:"mode"`
 		Interval string `json:"interval"`
-		Target   string `json:"target"`
-		Threads  int    `json:"threads"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if err := s.rotationMgr.Configure(req.Enabled, req.Interval, req.Target, req.Threads); err != nil {
+	if err := s.rotationMgr.Configure(req.Enabled, req.Mode, req.Interval); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, s.rotationMgr.GetStatus())
 }
 
-// API: Trigger Immediate Rotation Cycle
+// API: Trigger Immediate Rotation Cycle (Signal-based or on-demand)
 func (s *Server) handleRotationTrigger(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	s.rotationMgr.TriggerNow()
-	writeJSON(w, http.StatusOK, map[string]string{"status": "triggered"})
+	triggerType := r.URL.Query().Get("type")
+	if triggerType == "" {
+		triggerType = "signal"
+	}
+	s.rotationMgr.TriggerNow(triggerType)
+	s.logger.Info("rotation cycle triggered via signal",
+		slog.String("source", "web"),
+		slog.String("trigger", triggerType),
+	)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "triggered",
+		"trigger": triggerType,
+	})
 }
 
 // API: Get Rotation Pool Configs

@@ -1578,22 +1578,131 @@ input:checked + .slider:before {
    AUTO-ROTATION ENGINE STYLES
    ========================================================================== */
 
-.rotation-config-grid {
+/* ==========================================================================
+   AUTO-ROTATION ENGINE STYLES (MULTIPLE ACTIVITY MODES)
+   ========================================================================== */
+
+.rotation-mode-cards {
   display: grid;
-  grid-template-columns: 1fr 2fr 1fr auto;
-  gap: 1rem;
-  align-items: flex-end;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.85rem;
 }
 
-@media (max-width: 900px) {
-  .rotation-config-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-.align-end {
+.rotation-mode-card {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.85rem 1.15rem;
+  background: rgba(10, 15, 26, 0.5);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+}
+
+.rotation-mode-card:hover {
+  background: rgba(15, 23, 42, 0.7);
+  border-color: rgba(6, 182, 212, 0.4);
+  transform: translateY(-1px);
+}
+
+.rotation-mode-card.active {
+  background: rgba(6, 182, 212, 0.12);
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 16px rgba(6, 182, 212, 0.2);
+}
+
+.rotation-mode-card input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.rotation-mode-card .mode-icon {
+  font-size: 1.5rem;
+  width: 42px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.rotation-mode-card.active .mode-icon {
+  background: rgba(6, 182, 212, 0.2);
+  box-shadow: 0 0 10px rgba(6, 182, 212, 0.3);
+}
+
+.rotation-mode-card .mode-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.rotation-mode-card .mode-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: #fff;
+}
+
+.rotation-mode-card .mode-desc {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+/* Engine State Pill */
+.engine-state-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(10, 15, 26, 0.6);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.55rem 0.85rem;
+  font-size: 0.85rem;
+  color: #fff;
+  height: 38px;
+}
+
+/* Centralized Benchmark Banner */
+.centralized-benchmark-banner {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.08), rgba(139, 92, 246, 0.06));
+  border: 1px solid rgba(6, 182, 212, 0.25);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  flex-wrap: wrap;
+}
+
+.banner-icon-wrap {
+  font-size: 1.4rem;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-sm);
+  background: rgba(6, 182, 212, 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.banner-content {
+  flex: 1;
+  min-width: 260px;
+}
+
+.rotation-action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
 }
 
 .truncate {

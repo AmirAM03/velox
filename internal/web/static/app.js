@@ -160,14 +160,14 @@ const app = {
 
     // Save Rotation Parameters
     document.getElementById('btn-save-rotation-cfg')?.addEventListener('click', () => {
+      const modeRadio = document.querySelector('input[name="rot-mode"]:checked');
+      const mode = modeRadio ? modeRadio.value : 'periodic';
       const interval = document.getElementById('rot-interval-select')?.value || '15m';
-      const target = document.getElementById('rot-target-input')?.value.trim() || 'https://www.google.com/generate_204';
-      const threads = parseInt(document.getElementById('rot-threads-select')?.value, 10) || 50;
       const enabled = document.getElementById('toggle-rotation-enabled')?.checked || false;
-      this.saveRotationConfig({ enabled, interval, target, threads });
+      this.saveRotationConfig({ enabled, mode, interval });
     });
 
-    // Trigger Rotation Now
+    // Trigger Rotation Now (Signal)
     document.getElementById('btn-rotation-trigger')?.addEventListener('click', async () => {
       await this.triggerRotationNow();
     });
@@ -1550,14 +1550,43 @@ const app = {
     }
   },
 
+  onRotationModeChange(mode) {
+    const cardPeriodic = document.getElementById('rot-mode-card-periodic');
+    const cardSignal = document.getElementById('rot-mode-card-signal');
+    const intervalGroup = document.getElementById('rot-interval-form-group');
+    const timerLabel = document.getElementById('rot-stat-timer-label');
+    const timerIcon = document.getElementById('rot-stat-timer-icon');
+    const intervalBadge = document.getElementById('rot-stat-interval-badge');
+
+    if (mode === 'signal') {
+      if (cardPeriodic) cardPeriodic.classList.remove('active');
+      if (cardSignal) cardSignal.classList.add('active');
+      if (intervalGroup) intervalGroup.style.opacity = '0.4';
+      if (timerLabel) timerLabel.textContent = 'Signal Status';
+      if (timerIcon) timerIcon.textContent = '⚡';
+      if (intervalBadge) intervalBadge.textContent = 'Mode: Signal-Based (On-Demand)';
+      const countdownEl = document.getElementById('rot-stat-countdown');
+      if (countdownEl && (!this.state.rotationStatus || !this.state.rotationStatus.is_benchmarking)) {
+        countdownEl.textContent = 'Signal Ready';
+      }
+    } else {
+      if (cardPeriodic) cardPeriodic.classList.add('active');
+      if (cardSignal) cardSignal.classList.remove('active');
+      if (intervalGroup) intervalGroup.style.opacity = '1';
+      if (timerLabel) timerLabel.textContent = 'Next Rotation';
+      if (timerIcon) timerIcon.textContent = '⏱️';
+      const intervalVal = document.getElementById('rot-interval-select')?.value || '15m';
+      if (intervalBadge) intervalBadge.textContent = `Mode: Periodic (${intervalVal})`;
+    }
+  },
+
   async saveRotationConfig(params) {
     try {
       const current = this.state.rotationStatus || {};
       const payload = {
         enabled: params.enabled !== undefined ? params.enabled : !!current.enabled,
+        mode: params.mode || current.mode || 'periodic',
         interval: params.interval || current.interval || '15m',
-        target: params.target || current.target || 'https://www.google.com/generate_204',
-        threads: params.threads || current.threads || 50,
       };
 
       const res = await fetch('/api/rotation/config', {
@@ -1569,7 +1598,7 @@ const app = {
       if (!res.ok) throw new Error(data.error || 'Failed to save configuration');
       this.state.rotationStatus = data;
       this.renderRotationStatus(data);
-      this.showToast('Auto-rotation parameters saved', 'success');
+      this.showToast(`Auto-rotation settings saved (${data.mode === 'signal' ? 'Signal-Based' : 'Periodic ' + data.interval})`, 'success');
     } catch (e) {
       this.showToast(e.message, 'error');
     }
@@ -1577,9 +1606,9 @@ const app = {
 
   async triggerRotationNow() {
     try {
-      const res = await fetch('/api/rotation/trigger', { method: 'POST' });
+      const res = await fetch('/api/rotation/trigger?type=signal', { method: 'POST' });
       if (!res.ok) throw new Error('Trigger failed');
-      this.showToast('Rotation triggered! Benchmarking pool...', 'info');
+      this.showToast('Rotation signal dispatched! Benchmarking pool via centralized methodology...', 'info');
       this.loadRotationStatus();
     } catch (e) {
       this.showToast(e.message, 'error');
@@ -1616,6 +1645,7 @@ const app = {
     // Toggle & State
     const toggle = document.getElementById('toggle-rotation-enabled');
     const stateEl = document.getElementById('rot-stat-state');
+    const engineStateText = document.getElementById('rot-engine-state-text');
     if (toggle) toggle.checked = !!data.enabled;
     if (stateEl) {
       if (data.is_benchmarking) {
@@ -1629,18 +1659,31 @@ const app = {
         stateEl.className = 'stat-value text-sm text-muted';
       }
     }
+    if (engineStateText) {
+      engineStateText.textContent = data.enabled ? 'Enabled & Active' : 'Disabled (Paused)';
+    }
 
-    // Interval badge
-    const intervalBadge = document.getElementById('rot-stat-interval-badge');
-    if (intervalBadge) intervalBadge.textContent = `Interval: ${data.interval || '15m'}`;
+    // Mode handling
+    const mode = data.mode || 'periodic';
+    const radioPeriodic = document.querySelector('input[name="rot-mode"][value="periodic"]');
+    const radioSignal = document.querySelector('input[name="rot-mode"][value="signal"]');
+    if (mode === 'signal' && radioSignal) radioSignal.checked = true;
+    else if (radioPeriodic) radioPeriodic.checked = true;
+    this.onRotationModeChange(mode);
 
-    // Selects in form
+    // Interval badge & select
     const intervalSelect = document.getElementById('rot-interval-select');
     if (intervalSelect && data.interval) intervalSelect.value = data.interval;
-    const targetInput = document.getElementById('rot-target-input');
-    if (targetInput && data.target) targetInput.value = data.target;
-    const threadsSelect = document.getElementById('rot-threads-select');
-    if (threadsSelect && data.threads) threadsSelect.value = String(data.threads);
+
+    // Centralized Benchmark Info
+    const methodBadge = document.getElementById('rot-centralized-methodology-badge');
+    const targetLabel = document.getElementById('rot-centralized-target-label');
+    if (methodBadge && data.methodology_summary) {
+      methodBadge.textContent = data.methodology_summary;
+    }
+    if (targetLabel && data.target) {
+      targetLabel.textContent = data.target;
+    }
 
     // Pool counts
     const poolSize = document.getElementById('rot-stat-pool-size');
@@ -1708,7 +1751,7 @@ const app = {
     if (!tbody) return;
 
     if (!history || history.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7" class="text-center py-4 text-muted">No rotation cycles recorded yet.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" class="text-center py-4 text-muted">No rotation cycles recorded yet.</td></tr>`;
       return;
     }
 
@@ -1717,10 +1760,14 @@ const app = {
       const latStr = item.latency_ms > 0 ? `${Math.round(item.latency_ms)} ms` : '—';
       const scoreStr = item.score > 0 ? item.score.toFixed(3) : '—';
       const badgeClass = `badge-${item.protocol}`;
+      const triggerBadge = item.trigger_type === 'signal'
+        ? `<span class="badge badge-cyan" title="Triggered manually via Web UI or signal API">⚡ Signal</span>`
+        : `<span class="badge badge-purple" title="Triggered automatically via scheduled interval timer">⏱️ Periodic</span>`;
 
       return `
         <tr>
           <td class="text-mono text-xs text-muted">${t}</td>
+          <td>${triggerBadge}</td>
           <td class="text-muted text-sm truncate" title="${this.escapeHtml(item.from_node)}">${this.escapeHtml(item.from_node || 'None')}</td>
           <td class="font-semibold text-emerald truncate" title="${this.escapeHtml(item.to_node)}">${this.escapeHtml(item.to_node)}</td>
           <td><span class="badge ${badgeClass}">${item.protocol}</span></td>
@@ -1745,6 +1792,10 @@ const app = {
       }
       if (rot.is_benchmarking) {
         countdownEl.textContent = 'Testing...';
+        return;
+      }
+      if (rot.mode === 'signal') {
+        countdownEl.textContent = 'Signal Ready';
         return;
       }
       if (rot.next_rotation_at) {

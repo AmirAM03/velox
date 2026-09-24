@@ -234,11 +234,11 @@
         <div class="dashboard-header">
           <div>
             <h1 class="page-title">Auto-Rotation Engine</h1>
-            <p class="page-subtitle">Periodically benchmark a dedicated pool of configurations and dynamically activate the lowest-latency passing node</p>
+            <p class="page-subtitle">Periodically or signal-driven pool benchmarking to seamlessly activate the highest-scoring proxy node</p>
           </div>
           <div class="actions-group">
             <button id="btn-rotation-trigger" class="btn btn-primary">
-              <span class="icon">⚡</span> Rotate Now
+              <span class="icon">⚡</span> Trigger Signal Rotation
             </button>
           </div>
         </div>
@@ -258,11 +258,11 @@
           </div>
 
           <div class="stat-card">
-            <div class="stat-icon-wrap cyan">⏱️</div>
+            <div class="stat-icon-wrap cyan" id="rot-stat-timer-icon">⏱️</div>
             <div class="stat-data">
-              <span class="stat-label">Next Rotation</span>
+              <span class="stat-label" id="rot-stat-timer-label">Next Rotation</span>
               <span id="rot-stat-countdown" class="stat-value font-mono">--:--</span>
-              <span id="rot-stat-interval-badge" class="stat-tag">Interval: 15m</span>
+              <span id="rot-stat-interval-badge" class="stat-tag">Mode: Periodic (15m)</span>
             </div>
           </div>
 
@@ -288,40 +288,94 @@
         <!-- Rotation Settings Card -->
         <div class="glass-card mb-4">
           <div class="card-header">
-            <h3 class="card-title">Rotation Parameters</h3>
-            <span id="rot-config-status" class="text-xs text-muted">Persisted in SQLite</span>
+            <div>
+              <h3 class="card-title">Rotation Parameters & Activity Mode</h3>
+              <p class="text-muted text-xs mt-1">Configure periodic interval scheduling or instant signal-based rotation</p>
+            </div>
+            <span id="rot-config-status" class="badge badge-cyan">Persisted in SQLite</span>
           </div>
-          <div class="rotation-config-grid">
-            <div class="form-group">
-              <label class="form-label" for="rot-interval-select">Rotation Interval</label>
-              <select id="rot-interval-select" class="form-select">
-                <option value="1m">Every 1 Minute</option>
-                <option value="2m">Every 2 Minutes</option>
-                <option value="5m">Every 5 Minutes</option>
-                <option value="10m">Every 10 Minutes</option>
-                <option value="15m" selected>Every 15 Minutes</option>
-                <option value="30m">Every 30 Minutes</option>
-                <option value="1h">Every 1 Hour</option>
-              </select>
+
+          <!-- Activity Mode Selection Cards -->
+          <div class="rotation-mode-selector-wrap mt-2 mb-3">
+            <label class="form-label font-bold text-xs">Rotation Activity Mode:</label>
+            <div class="rotation-mode-cards">
+              <label class="rotation-mode-card active" id="rot-mode-card-periodic">
+                <input type="radio" name="rot-mode" value="periodic" checked onchange="app.onRotationModeChange('periodic')">
+                <div class="mode-icon">⏱️</div>
+                <div class="mode-info">
+                  <div class="mode-title">Periodic (Time-Interval Based)</div>
+                  <div class="mode-desc">Automatically benchmarks & rotates the pool on a scheduled interval</div>
+                </div>
+              </label>
+
+              <label class="rotation-mode-card" id="rot-mode-card-signal">
+                <input type="radio" name="rot-mode" value="signal" onchange="app.onRotationModeChange('signal')">
+                <div class="mode-icon">⚡</div>
+                <div class="mode-info">
+                  <div class="mode-title">Signal-Based (On-Demand)</div>
+                  <div class="mode-desc">Rotates instantly upon clicking "Trigger Signal Rotation" or API signal</div>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <!-- Form Controls & Centralized Benchmark Banner -->
+          <div class="rotation-settings-body">
+            <div class="form-row gap-3 flex-wrap">
+              <div class="form-group flex-1" id="rot-interval-form-group">
+                <label class="form-label" for="rot-interval-select">Periodic Interval Schedule</label>
+                <select id="rot-interval-select" class="form-select">
+                  <option value="1m">Every 1 Minute</option>
+                  <option value="2m">Every 2 Minutes</option>
+                  <option value="5m">Every 5 Minutes</option>
+                  <option value="10m">Every 10 Minutes</option>
+                  <option value="15m" selected>Every 15 Minutes</option>
+                  <option value="30m">Every 30 Minutes</option>
+                  <option value="1h">Every 1 Hour</option>
+                  <option value="2h">Every 2 Hours</option>
+                </select>
+                <span class="text-xs text-muted mt-1" id="rot-interval-hint">Timer auto-rotates to best pool node every interval.</span>
+              </div>
+
+              <div class="form-group flex-1">
+                <label class="form-label">Auto-Rotation Engine State</label>
+                <div class="engine-state-pill" id="rot-engine-state-display">
+                  <span class="status-dot"></span>
+                  <span id="rot-engine-state-text">Enabled & Active</span>
+                </div>
+                <span class="text-xs text-muted mt-1">Enable/disable via the master switch above.</span>
+              </div>
             </div>
 
-            <div class="form-group">
-              <label class="form-label" for="rot-target-input">Benchmark Target URL</label>
-              <input type="text" id="rot-target-input" class="form-input font-mono text-sm" value="https://www.google.com/generate_204">
+            <!-- Centralized Benchmark Methodology Banner (Single Source of Truth) -->
+            <div class="centralized-benchmark-banner mt-3">
+              <div class="banner-icon-wrap">🔗</div>
+              <div class="banner-content">
+                <div class="flex-align gap-2">
+                  <span class="font-bold text-sm text-main">Centralized Benchmark Engine</span>
+                  <span class="badge badge-cyan" id="rot-centralized-methodology-badge">3 Stages Active</span>
+                </div>
+                <p class="text-muted text-xs mt-1">
+                  Rotation benchmarking automatically follows the single centralized pipeline methodology and target URL configured in the Benchmark tab. No duplicate or divergent configurations.
+                </p>
+                <div class="banner-target-row mt-1 text-xs">
+                  <span class="text-muted">Authoritative Target URL:</span>
+                  <span class="text-mono text-cyan" id="rot-centralized-target-label">https://www.google.com/generate_204</span>
+                </div>
+              </div>
+              <button type="button" class="btn btn-secondary btn-sm" onclick="app.switchTab('benchmark')">
+                <span>⚙️ Manage in Benchmark Tab</span>
+              </button>
             </div>
 
-            <div class="form-group">
-              <label class="form-label" for="rot-threads-select">Concurrent Threads</label>
-              <select id="rot-threads-select" class="form-select">
-                <option value="10">10 Threads</option>
-                <option value="25">25 Threads</option>
-                <option value="50" selected>50 Threads</option>
-                <option value="100">100 Threads</option>
-              </select>
-            </div>
-
-            <div class="form-group align-end">
-              <button id="btn-save-rotation-cfg" class="btn btn-primary w-full">Save & Apply Parameters</button>
+            <!-- Action buttons -->
+            <div class="rotation-action-buttons mt-3">
+              <button id="btn-save-rotation-cfg" class="btn btn-primary">
+                <span>💾 Save Rotation Settings</span>
+              </button>
+              <button type="button" class="btn btn-emerald" onclick="app.triggerRotationNow()">
+                <span>⚡ Trigger Signal Rotation Now</span>
+              </button>
             </div>
           </div>
         </div>
@@ -373,17 +427,18 @@
             <table class="data-table">
               <thead>
                 <tr>
-                  <th style="width: 150px;">Time</th>
+                  <th style="width: 140px;">Time</th>
+                  <th style="width: 110px;">Trigger Type</th>
                   <th>Switched From</th>
                   <th>Switched To (Best)</th>
-                  <th style="width: 95px;">Protocol</th>
-                  <th style="width: 95px;">Latency</th>
-                  <th style="width: 95px;">Score</th>
+                  <th style="width: 85px;">Protocol</th>
+                  <th style="width: 90px;">Latency</th>
+                  <th style="width: 85px;">Score</th>
                   <th>Selection Reason</th>
                 </tr>
               </thead>
               <tbody id="rotation-history-tbody">
-                <tr><td colspan="7" class="text-center py-4 text-muted">No rotation cycles recorded yet.</td></tr>
+                <tr><td colspan="8" class="text-center py-4 text-muted">No rotation cycles recorded yet.</td></tr>
               </tbody>
             </table>
           </div>
