@@ -7,7 +7,7 @@ This document details the internal architecture, design principles, and algorith
 ## 1. Architectural Philosophy
 
 Velox was engineered to address the critical bottlenecks present in legacy proxy clients:
-1. **Zero External Daemon Dependency**: Rather than running background system daemons, Velox operates purely in user-space with an in-process engine.
+1. **Single Self-Contained Service**: Velox runs as one systemd service on a VPS; the Xray engine, scheduler, proxy listeners and dashboard all live in one process.
 2. **In-Process Core Execution**: By embedding Xray-core directly via Go API (`core.New`, `core.Dial`), Velox eliminates OS process-spawning overhead, inter-process communication (IPC) latency, and socket descriptor exhaustion.
 3. **Multi-Stage Progressive Pipeline**: Testing thousands of proxy configurations is computationally expensive. Velox organizes tests into stages of increasing cost, filtering out dead nodes before invoking resource-heavy TLS and proxy handshakes.
 4. **Cryptographic Deduplication**: Subscriptions and public pools often duplicate up to 70% of configurations under different labels. Velox identifies duplicate nodes by cryptographic hash, ensuring a clean SQLite database.
@@ -18,54 +18,29 @@ Velox was engineered to address the critical bottlenecks present in legacy proxy
 ## 2. System Architecture Diagram
 
 ```
-                             ┌──────────────────────────────────────┐
-                             │       User Interfaces (UI/CLI)       │
-                             │  ┌───────────────┐ ┌───────────────┐ │
-                             │  │ Web Dashboard │ │ Foreground CLI│ │
-                             │  │   (18080)     │ │   (Cobra)     │ │
-                             │  └───────┬───────┘ └───────┬───────┘ │
-                             └──────────┼─────────────────┼─────────┘
-                                        │                 │
-                                        ▼                 ▼
- ┌──────────────────────────────────────────────────────────────────────────────┐
- │                              Velox Core Engine                               │
- │                                                                              │
- │  ┌─────────────────┐       ┌─────────────────┐       ┌────────────────────┐  │
- │  │ Ingest & Parser │ ────► │  Deduplication  │ ────► │ Pure-Go SQLite WAL │  │
- │  │ (VLESS/VMess/   │       │ (SHA-256 Hash)  │       │ (Indexes & Schemas)│  │
- │  │  Trojan/SS/Hy2) │       └─────────────────┘       └─────────┬──────────┘  │
- │  └─────────────────┘                                           │             │
- │                                                                │             │
- │                                  ┌─────────────────────────────┘             │
- │                                  ▼                                           │
- │  ┌────────────────────────────────────────────────────────────────────────┐  │
- │  │                  Multi-Stage Concurrent Pipeline                       │  │
- │  │                                                                        │  │
- │  │  ┌───────────────────┐    ┌───────────────────┐    ┌─────────────────┐ │  │
- │  │  │ Stage 0: DNS+TCP  │───►│   Stage 1: TLS    │───►│ Stage 2: Proxy  │ │  │
- │  │  │   (2000 workers)  │    │   (500 workers)   │    │  (150 workers)  │ │  │
- │  │  └───────────────────┘    └───────────────────┘    └────────┬────────┘ │  │
- │  └─────────────────────────────────────────────────────────────┼──────────┘  │
- │                                                                │             │
- │                                  ┌─────────────────────────────┘             │
- │                                  ▼                                           │
- │  ┌───────────────────┐       ┌───────────────────┐       ┌────────────────┐  │
- │  │  Smart Scorer     │ ◄──── │ Embedded Xray-Core│ ◄──── │ Mixed Inbound  │  │
- │  │  (P95 Latency &   │       │ (In-Process Dial) │       │ (SOCKS5 + HTTP │  │
- │  │   Stability Math) │       └─────────┬─────────┘       │  127.0.0.1:1080│  │
- │  └───────────────────┘                 │                 └───────▲────────┘  │
- └────────────────────────────────────────┼─────────────────────────┼───────────┘
-                                          │                         │
-                                          ▼                         │
-                             ┌────────────────────────┐             │
-                             │  External Destination  │             │
-                             │   (Google/Cloudflare)  │             │
-                             └────────────────────────┘             │
-                                                                    │
-                             ┌──────────────────────────────────────┴───────────┐
-                             │           OS System Proxy Automation             │
-                             │   Windows (WinINet)  /  Linux (GNOME / KDE)      │
-                             └──────────────────────────────────────────────────┘
+ ┌───────────────────────────── Velox (one process) ─────────────────────────────┐
+ │                                                                                │
+ │  Sources (subscription URLs)                                                   │
+ │        │  every refresh interval (default 6h)                                  │
+ │        ▼                                                                       │
+ │  Fetch ──► Parse (VLESS/VMess/Trojan/SS/Hy2) ──► SHA-256 dedup ──► SQLite WAL  │
+ │                                                     (stale configs pruned)     │
+ │        │  every cycle (default 30m)                                            │
+ │        ▼                                                                       │
+ │  Optimizer                                                                     │
+ │   1. TCP + TLS steps once over all configs  (throwaway test engine)            │
+ │   2. fastest 500 survivors                                                     │
+ │   3. HTTP step once per profile, against that profile's target URL             │
+ │   4. top 10 per profile ──► profile_nodes table + live selector                │
+ │        │                                                                       │
+ │        ▼                                                                       │
+ │  Profile listeners (one per profile, 0.0.0.0:port, SOCKS5 + HTTP, user/pass)   │
+ │        │  active node = rank 1; failover to rank 2.. after repeated dial errors │
+ │        ▼                                                                       │
+ │  Shared serving Xray engine (one instance per node in use) ──► V2Ray node      │
+ │                                                                                │
+ │  Dashboard + JSON API on 127.0.0.1:18080 (reached through an SSH tunnel)       │
+ └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -102,8 +77,8 @@ When benchmarking thousands of configurations, a naive test (establishing an end
 | **Execution Model** | Spawns separate `xray.exe` or `sing-box` background processes | Direct in-memory invocation via `core.New` & `core.Dial` |
 | **System Overhead** | Process table bloat, IPC latency, zombie process risk | Single lightweight OS process, shared memory |
 | **File Descriptors** | Heavy socket churn across local loopback connections | Direct memory pipe without loopback proxy hop |
-| **Service Dependency**| Requires systemd service or Windows Service installation | Zero background daemons; clean user-initiated execution |
-| **Port Conflicts** | Requires separate management ports (e.g. 10085 API, 1080 proxy)| Unified internal routing |
+| **Service Model**| One external core process per running config | One `velox` systemd service; all nodes run inside it |
+| **Ports** | Separate management and proxy ports per core | One port per profile, all served by the shared engine |
 
 ---
 

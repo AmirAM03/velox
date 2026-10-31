@@ -10,16 +10,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/AmirAM03/velox/internal/config"
-	"github.com/AmirAM03/velox/internal/engine"
-	"github.com/AmirAM03/velox/internal/ingest"
 	loggerPkg "github.com/AmirAM03/velox/internal/logger"
 	"github.com/AmirAM03/velox/internal/model"
-	"github.com/AmirAM03/velox/internal/parser"
-	"github.com/AmirAM03/velox/internal/proxy"
 	"github.com/AmirAM03/velox/internal/storage"
 )
 
@@ -31,13 +26,8 @@ type Server struct {
 	dbHandler   *loggerPkg.DBHandler
 	port        int
 	jobMgr      *BenchmarkJobManager
-	rotationMgr *RotationManager
-
-	mu            sync.Mutex
-	proxyEngine   engine.Engine
-	proxyServer   *proxy.Server
-	proxySelector *proxy.Selector
-	activeConfig  *model.ProxyConfig
+	profiles    *ProfileManager
+	optimizer   *Optimizer
 }
 
 // NewServer creates a new web dashboard server.
@@ -66,18 +56,8 @@ func NewServer(cfg *config.Config, store *storage.Store, port int, logger *slog.
 		jobMgr:    jobMgr,
 	}
 
-	s.rotationMgr = NewRotationManager(
-		store,
-		&cfg.Pipeline,
-		cfg.Scoring,
-		logger,
-		func(target *model.ProxyConfig) error {
-			return s.SwitchActiveConfig(target)
-		},
-		func(event map[string]interface{}) {
-			s.jobMgr.Broadcast(event)
-		},
-	)
+	s.profiles = NewProfileManager(store, cfg.Proxy.ListenAddr, cfg.Proxy.FailThreshold, logger)
+	s.optimizer = NewOptimizer(store, &cfg.Pipeline, s.profiles, logger, jobMgr.Broadcast, jobMgr.Running)
 
 	return s
 }
@@ -111,12 +91,9 @@ func (s *Server) Start(ctx context.Context) error {
 	// 2. REST API endpoints
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/configs", s.handleConfigs)
-	mux.HandleFunc("/api/parse", s.handleParse)
 	mux.HandleFunc("/api/test", s.handleTest)
 	mux.HandleFunc("/api/test/stream", s.handleTestStream)
 	mux.HandleFunc("/api/test/cancel", s.handleTestCancel)
-	mux.HandleFunc("/api/connect", s.handleConnect)
-	mux.HandleFunc("/api/disconnect", s.handleDisconnect)
 	mux.HandleFunc("/api/dedup", s.handleDedup)
 
 	// Application Logs API
@@ -127,24 +104,23 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/logs/clear", s.handleLogClear)
 	mux.HandleFunc("/api/logs/export", s.handleLogExport)
 
-	// Auto-Rotation API
-	mux.HandleFunc("/api/rotation/status", s.handleRotationStatus)
-	mux.HandleFunc("/api/rotation/config", s.handleRotationConfig)
-	mux.HandleFunc("/api/rotation/trigger", s.handleRotationTrigger)
-	mux.HandleFunc("/api/rotation/signal", s.handleRotationTrigger)
-	mux.HandleFunc("/api/rotation/pool", s.handleRotationPool)
-	mux.HandleFunc("/api/rotation/pool/add", s.handleRotationPoolAdd)
-	mux.HandleFunc("/api/rotation/pool/remove", s.handleRotationPoolRemove)
-	mux.HandleFunc("/api/rotation/pool/add-working", s.handleRotationPoolAddWorking)
-	mux.HandleFunc("/api/rotation/pool/clear", s.handleRotationPoolClear)
+	// Subscription sources, profiles and the background optimizer
+	mux.HandleFunc("/api/sources", s.handleSources)
+	mux.HandleFunc("/api/sources/toggle", s.handleSourceToggle)
+	mux.HandleFunc("/api/sources/delete", s.handleSourceDelete)
+	mux.HandleFunc("/api/profiles", s.handleProfiles)
+	mux.HandleFunc("/api/profiles/delete", s.handleProfileDelete)
+	mux.HandleFunc("/api/optimizer", s.handleOptimizer)
+	mux.HandleFunc("/api/optimizer/run", s.handleOptimizerRun)
 
 	// Benchmark Methodology Chain API
 	mux.HandleFunc("/api/benchmark/methodology", s.handleBenchmarkMethodology)
 
-	// Start background auto-rotation engine
-	if s.rotationMgr != nil {
-		s.rotationMgr.Start(ctx)
+	// Start profile listeners and the background optimizer
+	if err := s.profiles.Sync(); err != nil {
+		return err
 	}
+	s.optimizer.Start(ctx)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	httpSrv := &http.Server{
@@ -154,9 +130,6 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		if s.rotationMgr != nil {
-			s.rotationMgr.Stop()
-		}
 		s.Close()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -174,20 +147,9 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// Close stops the local proxy. Rotation keeps running; it is stopped only on shutdown.
+// Close stops all profile listeners.
 func (s *Server) Close() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.proxyServer != nil {
-		s.proxyServer.Stop()
-		s.proxyServer = nil
-	}
-	if s.proxyEngine != nil {
-		s.proxyEngine.Close()
-		s.proxyEngine = nil
-	}
-	s.activeConfig = nil
+	s.profiles.Close()
 }
 
 // API: Status
@@ -195,25 +157,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	total, _ := s.store.ConfigCount()
 	protoCounts, _ := s.store.ConfigCountByProtocol()
 
-	s.mu.Lock()
-	var active *model.ProxyConfig
-	if s.activeConfig != nil {
-		active = s.activeConfig
-	}
-	s.mu.Unlock()
-
-	var rotStatus interface{}
-	if s.rotationMgr != nil {
-		rotStatus = s.rotationMgr.GetStatus()
-	}
+	profiles, _ := s.profiles.Status()
+	sources, _ := s.store.ListSources()
 
 	resp := map[string]interface{}{
-		"total_configs":        total,
-		"protocol_counts":      protoCounts,
-		"active_config":        active,
-		"mixed_port":           s.cfg.Proxy.MixedPort,
-		"db_path":              s.cfg.DBPath(),
-		"rotation":             rotStatus,
+		"total_configs":   total,
+		"protocol_counts": protoCounts,
+		"db_path":         s.cfg.DBPath(),
+		"listen_addr":     s.cfg.Proxy.ListenAddr,
+		"profiles":        profiles,
+		"sources":         sources,
+		"optimizer":       s.optimizer.Status(),
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -257,66 +211,6 @@ func (s *Server) handleConfigs(w http.ResponseWriter, r *http.Request) {
 		"working_only": workingOnly,
 		"sort_by":      sortBy,
 		"sort_order":   sortOrder,
-	})
-}
-
-// API: Parse / Ingest
-func (s *Server) handleParse(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	var req struct {
-		URLs []string `json:"urls"`
-		Raw  string   `json:"raw"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	var allRaw []string
-	for _, u := range req.URLs {
-		s.jobMgr.Log("info", "ingest", fmt.Sprintf("Fetching subscription: %s", u))
-		raw, err := ingest.FetchSubscription(u, 0)
-		if err != nil {
-			s.logger.Error("web ingest: failed fetch", "url", u, "error", err)
-			s.jobMgr.Log("error", "ingest", fmt.Sprintf("Failed to fetch %s: %v", u, err))
-			continue
-		}
-		s.jobMgr.Log("success", "ingest", fmt.Sprintf("Successfully retrieved payload from %s (%d bytes)", u, len(raw)))
-		allRaw = append(allRaw, raw)
-	}
-	if req.Raw != "" {
-		s.jobMgr.Log("info", "ingest", fmt.Sprintf("Processing manual text input (%d bytes)", len(req.Raw)))
-		allRaw = append(allRaw, req.Raw)
-	}
-
-	merged := strings.Join(allRaw, "\n")
-	cleaned := ingest.CleanRawContent(merged)
-
-	configs, failures, batchDups := parser.ParseManyDetailed(cleaned)
-	for _, cfg := range configs {
-		cfg.Source = "web-ui"
-	}
-	s.jobMgr.Log("info", "ingest", fmt.Sprintf("Parsed %d configurations (%d duplicates discarded, %d invalid lines skipped)", len(configs), batchDups, failures))
-
-	inserted, updated, err := s.store.UpsertConfigs(configs)
-	if err != nil {
-		s.jobMgr.Log("error", "ingest", fmt.Sprintf("Database upsert failed: %v", err))
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	s.jobMgr.Log("success", "ingest", fmt.Sprintf("Database updated: %d new inserted, %d existing refreshed", inserted, updated))
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"parsed":           len(configs),
-		"inserted":         inserted,
-		"updated":          updated,
-		"batch_duplicates": batchDups,
-		"failures":         failures,
 	})
 }
 
@@ -440,122 +334,6 @@ func (s *Server) handleTestCancel(w http.ResponseWriter, r *http.Request) {
 	} else {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "not_running"})
 	}
-}
-
-// SwitchActiveConfig switches the active proxy outbound node dynamically or starts the proxy.
-func (s *Server) SwitchActiveConfig(targetConfig *model.ProxyConfig) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	mixedPort := s.cfg.Proxy.MixedPort
-	if mixedPort <= 0 {
-		mixedPort = 1080
-	}
-
-	if s.proxyServer != nil && s.proxySelector != nil && s.proxyEngine != nil {
-		// Hot switch via Selector without dropping inbound socket listener
-		s.proxySelector.SelectExplicitly(targetConfig)
-		s.activeConfig = targetConfig
-		if s.rotationMgr != nil {
-			s.rotationMgr.SetActiveNode(targetConfig)
-		}
-		s.jobMgr.Log("info", "proxy", fmt.Sprintf("Switched active proxy routing to '%s' (%s:%d)", targetConfig.DisplayName(), targetConfig.Address, targetConfig.Port))
-		return nil
-	}
-
-	// Clean up previous proxy if partially running
-	if s.proxyServer != nil {
-		s.proxyServer.Stop()
-		s.proxyServer = nil
-	}
-	if s.proxyEngine != nil {
-		s.proxyEngine.Close()
-		s.proxyEngine = nil
-	}
-
-	eng := engine.NewXrayEngine(s.logger)
-	sel := proxy.NewSelector(s.store, 5, 2, s.logger)
-	sel.SelectExplicitly(targetConfig)
-
-	s.jobMgr.Log("info", "proxy", fmt.Sprintf("Activating local proxy routing via '%s' (%s:%d)", targetConfig.DisplayName(), targetConfig.Address, targetConfig.Port))
-
-	srv := proxy.NewServer(s.cfg.Proxy.ListenAddr, mixedPort, eng, sel, s.logger)
-	if err := srv.Start(); err != nil {
-		eng.Close()
-		s.jobMgr.Log("error", "proxy", fmt.Sprintf("Failed to bind proxy on %s:%d: %v", s.cfg.Proxy.ListenAddr, mixedPort, err))
-		return fmt.Errorf("start proxy: %w", err)
-	}
-
-	s.proxyEngine = eng
-	s.proxyServer = srv
-	s.proxySelector = sel
-	s.activeConfig = targetConfig
-	if s.rotationMgr != nil {
-		s.rotationMgr.SetActiveNode(targetConfig)
-	}
-
-	s.jobMgr.Log("success", "proxy", fmt.Sprintf("Mixed proxy (HTTP/SOCKS5) listening on %s:%d", s.cfg.Proxy.ListenAddr, mixedPort))
-	return nil
-}
-
-// API: Connect
-func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	var req struct {
-		ConfigID string `json:"config_id"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
-
-	var targetConfig *model.ProxyConfig
-	if req.ConfigID != "" {
-		configs, err := s.store.GetConfigsByIDs([]string{req.ConfigID})
-		if err != nil || len(configs) == 0 {
-			writeError(w, http.StatusNotFound, "config not found")
-			return
-		}
-		targetConfig = configs[0]
-	} else {
-		configs, err := s.store.ListConfigs(1)
-		if err != nil || len(configs) == 0 {
-			writeError(w, http.StatusBadRequest, "no configurations available")
-			return
-		}
-		targetConfig = configs[0]
-	}
-
-	if err := s.SwitchActiveConfig(targetConfig); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	mixedPort := s.cfg.Proxy.MixedPort
-	if mixedPort <= 0 {
-		mixedPort = 1080
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":   "connected",
-		"id":       targetConfig.ID,
-		"name":     targetConfig.DisplayName(),
-		"protocol": string(targetConfig.Protocol),
-		"port":     mixedPort,
-	})
-}
-
-// API: Disconnect
-func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	s.Close()
-	s.jobMgr.Log("info", "proxy", "Local proxy disconnected and shut down")
-	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
 // API: Deduplicate
@@ -801,191 +579,6 @@ func (s *Server) handleLogExport(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(records)
-}
-
-// API: Get Rotation Status
-func (s *Server) handleRotationStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	writeJSON(w, http.StatusOK, s.rotationMgr.GetStatus())
-}
-
-// API: Configure Rotation
-func (s *Server) handleRotationConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	var req struct {
-		Enabled  bool   `json:"enabled"`
-		Mode     string `json:"mode"`
-		Interval string `json:"interval"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if err := s.rotationMgr.Configure(req.Enabled, req.Mode, req.Interval); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, s.rotationMgr.GetStatus())
-}
-
-// API: Trigger Immediate Rotation Cycle (Signal-based or on-demand)
-func (s *Server) handleRotationTrigger(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if !s.rotationMgr.GetStatus().Enabled {
-		writeError(w, http.StatusConflict, "auto-rotation is disabled; enable it first")
-		return
-	}
-	s.rotationMgr.TriggerNow()
-	s.logger.Info("rotation cycle triggered via signal", slog.String("source", "web"))
-	writeJSON(w, http.StatusOK, map[string]string{"status": "triggered", "trigger": "signal"})
-}
-
-// API: Get Rotation Pool Configs
-func (s *Server) handleRotationPool(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	configs, err := s.store.GetRotationPoolConfigs()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	total, working, _ := s.store.GetRotationPoolStats()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"configs": configs,
-		"total":   total,
-		"working": working,
-	})
-}
-
-// API: Add Config(s) to Rotation Pool
-func (s *Server) handleRotationPoolAdd(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	var req struct {
-		ConfigID  string   `json:"config_id"`
-		ConfigIDs []string `json:"config_ids"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	var ids []string
-	if req.ConfigID != "" {
-		ids = append(ids, req.ConfigID)
-	}
-	ids = append(ids, req.ConfigIDs...)
-
-	added, err := s.store.AddToRotationPool(ids)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	s.logger.Info("added configurations to rotation pool",
-		slog.String("source", "system"),
-		slog.Int64("added", added),
-	)
-
-	total, working, _ := s.store.GetRotationPoolStats()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"added":   added,
-		"total":   total,
-		"working": working,
-	})
-}
-
-// API: Remove Config(s) from Rotation Pool
-func (s *Server) handleRotationPoolRemove(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	var req struct {
-		ConfigID  string   `json:"config_id"`
-		ConfigIDs []string `json:"config_ids"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	var ids []string
-	if req.ConfigID != "" {
-		ids = append(ids, req.ConfigID)
-	}
-	ids = append(ids, req.ConfigIDs...)
-
-	removed, err := s.store.RemoveFromRotationPool(ids)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	total, working, _ := s.store.GetRotationPoolStats()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"removed": removed,
-		"total":   total,
-		"working": working,
-	})
-}
-
-// API: Add All Working Configs to Rotation Pool
-func (s *Server) handleRotationPoolAddWorking(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	protocol := r.URL.Query().Get("protocol")
-	added, err := s.store.AddWorkingConfigsToRotationPool(protocol)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	s.logger.Info("added all working configurations to rotation pool",
-		slog.String("source", "system"),
-		slog.Int64("added", added),
-	)
-	total, working, _ := s.store.GetRotationPoolStats()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"added":   added,
-		"total":   total,
-		"working": working,
-	})
-}
-
-// API: Clear Entire Rotation Pool
-func (s *Server) handleRotationPoolClear(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if err := s.store.ClearRotationPool(); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	s.logger.Info("cleared rotation pool", slog.String("source", "system"))
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"total":   0,
-		"working": 0,
-	})
 }
 
 // API: Get or Save Benchmark Methodology Chain

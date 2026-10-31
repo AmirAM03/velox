@@ -177,3 +177,16 @@ func (s *Selector) WarmPool() []*model.ProxyConfig {
 	copy(out, s.warmPool)
 	return out
 }
+
+// SetPool replaces the warm pool with a ranked list (best first) and makes the best one active.
+func (s *Selector) SetPool(configs []*model.ProxyConfig) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.warmPool = configs
+	s.failCount = 0
+	if len(configs) > 0 {
+		s.active = configs[0]
+	} else {
+		s.active = nil
+	}
+}

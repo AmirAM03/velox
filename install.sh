@@ -54,38 +54,51 @@ esac
 
 info "Detected architecture: $TARGET_ARCH"
 
-# Detect latest version
-info "Fetching latest release version from GitHub..."
-LATEST_TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-
-if [ -z "$LATEST_TAG" ]; then
-    warn "Could not resolve latest release tag via GitHub API, falling back to v0.1.0"
-    LATEST_TAG="v0.1.0"
-fi
-
-info "Installing Velox $LATEST_TAG ($TARGET_ARCH)..."
+# Optional: --binary PATH installs a locally built binary instead of a GitHub release.
+LOCAL_BINARY=""
+DASHBOARD_PORT=18080
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --binary) LOCAL_BINARY="$2"; shift 2 ;;
+        --port) DASHBOARD_PORT="$2"; shift 2 ;;
+        *) error "Unknown option: $1 (supported: --binary PATH, --port N)" ;;
+    esac
+done
 
 # Temporary directory for download
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-ARCHIVE_NAME="velox-${LATEST_TAG}-linux-${TARGET_ARCH}.tar.gz"
-DOWNLOAD_URL="https://github.com/$REPO/releases/download/${LATEST_TAG}/${ARCHIVE_NAME}"
+if [ -n "$LOCAL_BINARY" ]; then
+    [ -f "$LOCAL_BINARY" ] || error "Binary not found: $LOCAL_BINARY"
+    LATEST_TAG="local build"
+    cp "$LOCAL_BINARY" "$TMP_DIR/velox"
+else
+    info "Fetching latest release version from GitHub..."
+    LATEST_TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    [ -n "$LATEST_TAG" ] || error "Could not resolve the latest release from GitHub. Use --binary PATH to install a local build."
 
-info "Downloading from $DOWNLOAD_URL ..."
-curl -fsSL -o "$TMP_DIR/$ARCHIVE_NAME" "$DOWNLOAD_URL" || error "Failed to download $DOWNLOAD_URL"
+    info "Installing Velox $LATEST_TAG ($TARGET_ARCH)..."
+    ARCHIVE_NAME="velox-${LATEST_TAG}-linux-${TARGET_ARCH}.tar.gz"
+    DOWNLOAD_URL="https://github.com/$REPO/releases/download/${LATEST_TAG}/${ARCHIVE_NAME}"
 
-# Extract archive
-info "Extracting archive..."
-tar -xzf "$TMP_DIR/$ARCHIVE_NAME" -C "$TMP_DIR"
+    info "Downloading from $DOWNLOAD_URL ..."
+    curl -fsSL -o "$TMP_DIR/$ARCHIVE_NAME" "$DOWNLOAD_URL" || error "Failed to download $DOWNLOAD_URL"
+    tar -xzf "$TMP_DIR/$ARCHIVE_NAME" -C "$TMP_DIR"
+fi
 
 # Install binary
 install -m 755 "$TMP_DIR/velox" "$INSTALL_DIR/velox"
 success "Installed binary to $INSTALL_DIR/velox"
 
-# Create data directory
+# Dedicated unprivileged service user owning the data directory
+if ! id -u velox >/dev/null 2>&1; then
+    useradd --system --no-create-home --home-dir "$DATA_DIR" --shell /usr/sbin/nologin velox
+    info "Created system user 'velox'"
+fi
 mkdir -p "$DATA_DIR"
-chmod 755 "$DATA_DIR"
+chown -R velox:velox "$DATA_DIR"
+chmod 750 "$DATA_DIR"
 
 # Create config directory and default configuration
 mkdir -p "$CONFIG_DIR"
@@ -101,16 +114,51 @@ else
     info "Existing configuration at $CONFIG_DIR/config.yaml preserved"
 fi
 
+# systemd service: starts on boot, restarts on crash, upgrades in place
+SERVICE_FILE="/etc/systemd/system/velox.service"
+if command -v systemctl >/dev/null 2>&1; then
+    cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=Velox V2Ray connector and dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=velox
+Group=velox
+ExecStart=$INSTALL_DIR/velox --config $CONFIG_DIR/config.yaml --data-dir $DATA_DIR --port $DASHBOARD_PORT
+Restart=on-failure
+RestartSec=5
+# Benchmarks open thousands of sockets at once.
+LimitNOFILE=1048576
+# Lets profiles use ports below 1024 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=$DATA_DIR
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable velox.service >/dev/null 2>&1
+    systemctl restart velox.service
+    success "Velox service installed and started (systemctl status velox)"
+else
+    warn "systemd not found; start Velox manually: sudo -u velox $INSTALL_DIR/velox --config $CONFIG_DIR/config.yaml --data-dir $DATA_DIR"
+fi
+
 echo -e "\n${GREEN}════════════════════════════════════════════════════════════${NC}"
 echo -e "${GREEN}       Velox ${LATEST_TAG} installed successfully!${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}\n"
 
-echo -e "Quick Usage Guide:\n"
-echo -e "  1. Launch the Web Dashboard (listens on 127.0.0.1 only):"
-echo -e "     ${CYAN}velox --port 18080${NC}\n"
-echo -e "  2. From your own machine, open an SSH tunnel to reach it:"
-echo -e "     ${CYAN}ssh -L 18080:127.0.0.1:18080 user@this-server${NC}\n"
-echo -e "  3. Specify custom data directory:"
-echo -e "     ${CYAN}velox --data-dir /path/to/data${NC}\n"
-echo -e "Proxy listen address: ${GREEN}127.0.0.1:1080${NC} (Mixed SOCKS5 / HTTP)"
-echo -e "Web Dashboard URL:    ${GREEN}http://127.0.0.1:18080${NC}\n"
+echo -e "Next steps:\n"
+echo -e "  1. From your own machine, open an SSH tunnel to the dashboard:"
+echo -e "     ${CYAN}ssh -L ${DASHBOARD_PORT}:127.0.0.1:${DASHBOARD_PORT} user@this-server${NC}"
+echo -e "     then browse to ${GREEN}http://127.0.0.1:${DASHBOARD_PORT}${NC}\n"
+echo -e "  2. Sources tab: add your subscription URLs."
+echo -e "  3. Profiles tab: create one profile per target service (port + username + password)."
+echo -e "  4. Open each profile port in your firewall, e.g.: ${CYAN}ufw allow 20001/tcp${NC}\n"
+echo -e "Logs: ${CYAN}journalctl -u velox -f${NC}\n"

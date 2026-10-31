@@ -23,20 +23,19 @@
 
       <nav class="nav-links">
         <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
+        <button class="nav-btn" data-tab="profiles">Profiles</button>
+        <button class="nav-btn" data-tab="sources">Sources</button>
         <button class="nav-btn" data-tab="configs">Configs</button>
-        <button class="nav-btn" data-tab="rotation">🔄 Auto-Rotation</button>
-        <button class="nav-btn" data-tab="ingest">Ingest & Parse</button>
         <button class="nav-btn" data-tab="benchmark">Benchmark</button>
         <button class="nav-btn" data-tab="logs">Application Logs</button>
         <button class="nav-btn" data-tab="tools">Database Tools</button>
       </nav>
 
       <div class="nav-status-group">
-        <div id="proxy-status-pill" class="status-pill idle">
+        <div id="optimizer-status-pill" class="status-pill idle">
           <span class="status-dot"></span>
-          <span id="proxy-status-text">Proxy: Disconnected</span>
+          <span id="optimizer-status-text">Optimizer: Idle</span>
         </div>
-        <button id="quick-toggle-btn" class="btn btn-primary btn-sm">Connect Best</button>
       </div>
     </header>
 
@@ -51,7 +50,7 @@
         <div class="dashboard-header">
           <div>
             <h1 class="page-title">System Overview</h1>
-            <p class="page-subtitle">Real-time telemetry, proxy status, and node statistics</p>
+            <p class="page-subtitle">Profiles, subscriptions and node statistics</p>
           </div>
           <div class="actions-group">
             <button id="btn-refresh-all" class="btn btn-secondary">
@@ -74,9 +73,9 @@
           <div class="stat-card">
             <div class="stat-icon-wrap emerald">⚡</div>
             <div class="stat-data">
-              <span class="stat-label">Active Proxy</span>
-              <span id="stat-active-node" class="stat-value text-sm">None</span>
-              <span id="stat-active-port" class="stat-tag">Endpoint: 127.0.0.1:1080</span>
+              <span class="stat-label">Profiles</span>
+              <span id="stat-profiles" class="stat-value text-sm">0 / 0 running</span>
+              <span id="stat-sources" class="stat-tag">0 sources</span>
             </div>
           </div>
 
@@ -86,6 +85,15 @@
               <span class="stat-label">Benchmark Status</span>
               <span id="stat-tested-count" class="stat-value">0 Tested</span>
               <span id="stat-avg-latency" class="stat-tag">Avg: — ms</span>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon-wrap amber">🧭</div>
+            <div class="stat-data">
+              <span class="stat-label">Optimizer</span>
+              <span id="stat-optimizer-phase" class="stat-value text-sm">Idle</span>
+              <span class="stat-tag">Fetches, tests and assigns nodes</span>
             </div>
           </div>
 
@@ -117,11 +125,10 @@
                   <th>Server</th>
                   <th>Score</th>
                   <th>Latency</th>
-                  <th>Action</th>
                 </tr>
               </thead>
               <tbody id="top-nodes-tbody">
-                <tr><td colspan="7" class="text-muted text-center py-4">Loading top nodes...</td></tr>
+                <tr><td colspan="6" class="text-muted text-center py-4">Loading top nodes...</td></tr>
               </tbody>
             </table>
           </div>
@@ -169,21 +176,6 @@
               </div>
             </div>
           </div>
-
-          <!-- Bulk Selection Toolbar -->
-          <div class="bulk-actions-toolbar" id="configs-bulk-toolbar">
-            <div class="bulk-selected-info">
-              <span id="bulk-selected-count">0 items selected</span>
-            </div>
-            <div class="bulk-btn-group">
-              <button id="btn-bulk-add-pool" class="btn btn-secondary btn-sm" disabled>
-                <span>+ Add Selected to Pool</span>
-              </button>
-              <button id="btn-bulk-add-working" class="btn btn-emerald btn-sm" title="Add all verified passing configurations to the auto-rotation pool">
-                <span>⚡ Add All Working to Pool</span>
-              </button>
-            </div>
-          </div>
         </div>
 
         <!-- All Configs Table -->
@@ -192,7 +184,6 @@
             <table class="data-table">
               <thead>
                 <tr>
-                  <th style="width: 36px;"><input type="checkbox" id="configs-check-all" title="Select / Deselect All on page"></th>
                   <th style="width: 48px;">Rank</th>
                   <th style="width: 95px;">Protocol</th>
                   <th>Remark / Name</th>
@@ -200,11 +191,11 @@
                   <th style="width: 110px;">Transport</th>
                   <th style="width: 90px;">Latency</th>
                   <th style="width: 90px;">Score</th>
-                  <th style="width: 175px;">Actions</th>
+                  <th style="width: 90px;">Actions</th>
                 </tr>
               </thead>
               <tbody id="all-configs-tbody">
-                <tr><td colspan="9" class="text-muted text-center py-4">Loading configurations...</td></tr>
+                <tr><td colspan="8" class="text-muted text-center py-4">Loading configurations...</td></tr>
               </tbody>
             </table>
           </div>
@@ -218,261 +209,159 @@
         </div>
       </section>
 
-      <!-- AUTO-ROTATION VIEW -->
-      <section id="tab-rotation" class="tab-pane">
+      <!-- PROFILES VIEW -->
+      <section id="tab-profiles" class="tab-pane">
         <div class="dashboard-header">
           <div>
-            <h1 class="page-title">Auto-Rotation Engine</h1>
-            <p class="page-subtitle">Periodically or signal-driven pool benchmarking to seamlessly activate the highest-scoring proxy node</p>
+            <h1 class="page-title">Profiles</h1>
+            <p class="page-subtitle">Each profile is a public SOCKS5/HTTP port that routes through the best node for its target service</p>
           </div>
           <div class="actions-group">
-            <button id="btn-rotation-trigger" class="btn btn-primary">
-              <span class="icon">⚡</span> Trigger Signal Rotation
-            </button>
+            <button id="btn-run-cycle" class="btn btn-secondary"><span class="icon">↻</span> Re-test now</button>
           </div>
         </div>
 
-        <!-- Rotation Status Cards -->
-        <div class="stats-grid mb-4">
-          <div class="stat-card">
-            <div class="stat-icon-wrap emerald">🔄</div>
-            <div class="stat-data">
-              <span class="stat-label">Auto-Rotation</span>
-              <span id="rot-stat-state" class="stat-value text-sm">Disabled</span>
-              <label class="toggle-switch">
-                <input type="checkbox" id="toggle-rotation-enabled">
-                <span class="slider"></span>
-              </label>
+        <div class="two-col-grid mb-4">
+          <div class="glass-card">
+            <h3 class="card-title mb-3" id="profile-form-title">New Profile</h3>
+            <input type="hidden" id="profile-id">
+            <div class="form-group mb-3">
+              <label class="form-label" for="profile-name">Name</label>
+              <input type="text" id="profile-name" class="form-input" placeholder="YouTube">
             </div>
-          </div>
-
-          <div class="stat-card">
-            <div class="stat-icon-wrap cyan" id="rot-stat-timer-icon">⏱️</div>
-            <div class="stat-data">
-              <span class="stat-label" id="rot-stat-timer-label">Next Rotation</span>
-              <span id="rot-stat-countdown" class="stat-value font-mono">--:--</span>
-              <span id="rot-stat-interval-badge" class="stat-tag">Mode: Periodic (15m)</span>
+            <div class="form-group mb-3">
+              <label class="form-label" for="profile-target">Target service URL</label>
+              <input type="url" id="profile-target" class="form-input" placeholder="https://www.youtube.com/generate_204">
+              <span class="text-muted text-xs mt-1">Nodes are ranked by how fast they load this URL.</span>
             </div>
-          </div>
-
-          <div class="stat-card">
-            <div class="stat-icon-wrap purple">🏊</div>
-            <div class="stat-data">
-              <span class="stat-label">Selection Pool</span>
-              <span id="rot-stat-pool-size" class="stat-value">0 Nodes</span>
-              <span id="rot-stat-working-badge" class="stat-tag success">0 Working</span>
+            <div class="form-group mb-3">
+              <label class="form-label" for="profile-port">Port on this server</label>
+              <input type="number" id="profile-port" class="form-input" min="1" max="65535" placeholder="20001">
             </div>
-          </div>
-
-          <div class="stat-card">
-            <div class="stat-icon-wrap amber">🏆</div>
-            <div class="stat-data">
-              <span class="stat-label">Active Node</span>
-              <span id="rot-stat-active-node" class="stat-value text-sm truncate">None</span>
-              <span id="rot-stat-active-metrics" class="stat-tag">—</span>
+            <div class="form-group mb-3">
+              <label class="form-label" for="profile-username">Username</label>
+              <input type="text" id="profile-username" class="form-input" autocomplete="off">
             </div>
-          </div>
-        </div>
-
-        <!-- Rotation Settings Card -->
-        <div class="glass-card mb-4">
-          <div class="card-header">
-            <div>
-              <h3 class="card-title">Rotation Parameters & Activity Mode</h3>
-              <p class="text-muted text-xs mt-1">Configure periodic interval scheduling or instant signal-based rotation</p>
-            </div>
-            <span id="rot-config-status" class="badge badge-cyan">Persisted in SQLite</span>
-          </div>
-
-          <!-- Activity Mode Selection Cards -->
-          <div class="rotation-mode-selector-wrap mt-2 mb-3">
-            <label class="form-label font-bold text-xs">Rotation Activity Mode:</label>
-            <div class="rotation-mode-cards">
-              <label class="rotation-mode-card active" id="rot-mode-card-periodic">
-                <input type="radio" name="rot-mode" value="periodic" checked onchange="app.onRotationModeChange('periodic')">
-                <div class="mode-icon">⏱️</div>
-                <div class="mode-info">
-                  <div class="mode-title">Periodic (Time-Interval Based)</div>
-                  <div class="mode-desc">Automatically benchmarks & rotates the pool on a scheduled interval</div>
-                </div>
-              </label>
-
-              <label class="rotation-mode-card" id="rot-mode-card-signal">
-                <input type="radio" name="rot-mode" value="signal" onchange="app.onRotationModeChange('signal')">
-                <div class="mode-icon">⚡</div>
-                <div class="mode-info">
-                  <div class="mode-title">Signal-Based (On-Demand)</div>
-                  <div class="mode-desc">Rotates instantly upon clicking "Trigger Signal Rotation" or API signal</div>
-                </div>
-              </label>
-            </div>
-          </div>
-
-          <!-- Form Controls & Centralized Benchmark Banner -->
-          <div class="rotation-settings-body">
-            <div class="form-row gap-3 flex-wrap">
-              <div class="form-group flex-1" id="rot-interval-form-group">
-                <label class="form-label" for="rot-interval-select">Periodic Interval Schedule</label>
-                <select id="rot-interval-select" class="form-select">
-                  <option value="1m">Every 1 Minute</option>
-                  <option value="2m">Every 2 Minutes</option>
-                  <option value="5m">Every 5 Minutes</option>
-                  <option value="10m">Every 10 Minutes</option>
-                  <option value="15m" selected>Every 15 Minutes</option>
-                  <option value="30m">Every 30 Minutes</option>
-                  <option value="1h">Every 1 Hour</option>
-                  <option value="2h">Every 2 Hours</option>
-                </select>
-                <span class="text-xs text-muted mt-1" id="rot-interval-hint">Timer auto-rotates to best pool node every interval.</span>
-              </div>
-
-              <div class="form-group flex-1">
-                <label class="form-label">Auto-Rotation Engine State</label>
-                <div class="engine-state-pill" id="rot-engine-state-display">
-                  <span class="status-dot"></span>
-                  <span id="rot-engine-state-text">Enabled & Active</span>
-                </div>
-                <span class="text-xs text-muted mt-1">Enable/disable via the master switch above.</span>
+            <div class="form-group mb-3">
+              <label class="form-label" for="profile-password">Password</label>
+              <div class="input-group">
+                <input type="text" id="profile-password" class="form-input" autocomplete="off">
+                <button id="btn-gen-password" class="btn btn-secondary" type="button">Generate</button>
               </div>
             </div>
-
-            <!-- Centralized Benchmark Methodology Banner (Single Source of Truth) -->
-            <div class="centralized-benchmark-banner mt-3">
-              <div class="banner-icon-wrap">🔗</div>
-              <div class="banner-content">
-                <div class="flex-align gap-2">
-                  <span class="font-bold text-sm text-main">Centralized Benchmark Engine</span>
-                  <span class="badge badge-cyan" id="rot-centralized-methodology-badge">3 Stages Active</span>
-                </div>
-                <p class="text-muted text-xs mt-1">
-                  Rotation benchmarking automatically follows the single centralized pipeline methodology and target URL configured in the Benchmark tab. No duplicate or divergent configurations.
-                </p>
-                <div class="banner-target-row mt-1 text-xs">
-                  <span class="text-muted">Authoritative Target URL:</span>
-                  <span class="text-mono text-cyan" id="rot-centralized-target-label">https://www.google.com/generate_204</span>
-                </div>
-              </div>
-              <button type="button" class="btn btn-secondary btn-sm" onclick="app.switchTab('benchmark')">
-                <span>⚙️ Manage in Benchmark Tab</span>
-              </button>
+            <div class="form-group mb-3">
+              <label class="form-label"><input type="checkbox" id="profile-enabled" checked> Enabled</label>
             </div>
-
-            <!-- Action buttons -->
-            <div class="rotation-action-buttons mt-3">
-              <button id="btn-save-rotation-cfg" class="btn btn-primary">
-                <span>💾 Save Rotation Settings</span>
-              </button>
-              <button type="button" class="btn btn-emerald" onclick="app.triggerRotationNow()">
-                <span>⚡ Trigger Signal Rotation Now</span>
-              </button>
+            <div style="display: flex; gap: 0.5rem;">
+              <button id="btn-save-profile" class="btn btn-primary">Save Profile</button>
+              <button id="btn-reset-profile" class="btn btn-secondary" type="button">Clear</button>
             </div>
+          </div>
+
+          <div class="glass-card">
+            <h3 class="card-title mb-3">Optimizer</h3>
+            <div class="info-list text-sm mb-4">
+              <div class="info-row"><span class="text-muted">Status:</span><span id="opt-phase">—</span></div>
+              <div class="info-row"><span class="text-muted">Last test cycle:</span><span id="opt-last-cycle">—</span></div>
+              <div class="info-row"><span class="text-muted">Next test cycle:</span><span id="opt-next-cycle">—</span></div>
+              <div class="info-row"><span class="text-muted">Last subscription fetch:</span><span id="opt-last-refresh">—</span></div>
+              <div class="info-row"><span class="text-muted">Next subscription fetch:</span><span id="opt-next-refresh">—</span></div>
+              <div class="info-row"><span class="text-muted">Last result:</span><span id="opt-summary" class="text-xs">—</span></div>
+            </div>
+            <div class="form-group mb-3">
+              <label class="form-label" for="opt-cycle-interval">Re-test profiles every</label>
+              <select id="opt-cycle-interval" class="form-select">
+                <option value="5m">5 minutes</option>
+                <option value="15m">15 minutes</option>
+                <option value="30m">30 minutes</option>
+                <option value="1h">1 hour</option>
+                <option value="3h">3 hours</option>
+              </select>
+            </div>
+            <div class="form-group mb-3">
+              <label class="form-label" for="opt-refresh-interval">Fetch subscriptions every</label>
+              <select id="opt-refresh-interval" class="form-select">
+                <option value="1h">1 hour</option>
+                <option value="3h">3 hours</option>
+                <option value="6h">6 hours</option>
+                <option value="12h">12 hours</option>
+                <option value="24h">24 hours</option>
+              </select>
+            </div>
+            <div class="form-group mb-3">
+              <label class="form-label" for="opt-max-age">Drop configs no subscription has listed for</label>
+              <select id="opt-max-age" class="form-select">
+                <option value="1d">1 day</option>
+                <option value="3d">3 days</option>
+                <option value="7d">7 days</option>
+                <option value="14d">14 days</option>
+                <option value="30d">30 days</option>
+              </select>
+            </div>
+            <button id="btn-save-schedule" class="btn btn-primary">Save Schedule</button>
           </div>
         </div>
 
-        <!-- Selection Pool Table Card -->
-        <div class="glass-card mb-4">
-          <div class="card-header">
-            <div>
-              <h3 class="card-title">Selection Pool</h3>
-              <p class="text-muted text-xs">Only nodes in this pool are dynamically scored during rotation cycles</p>
-            </div>
-            <div class="actions-group">
-              <button id="btn-pool-add-working" class="btn btn-emerald btn-sm">
-                <span>⚡ Add All Working</span>
-              </button>
-              <button id="btn-pool-clear" class="btn btn-danger btn-sm">
-                <span>🗑 Clear Pool</span>
-              </button>
-            </div>
-          </div>
-
-          <div class="table-responsive">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th style="width: 48px;">#</th>
-                  <th style="width: 95px;">Protocol</th>
-                  <th>Node Remark / Name</th>
-                  <th>Endpoint</th>
-                  <th style="width: 95px;">Latency</th>
-                  <th style="width: 95px;">Score</th>
-                  <th style="width: 140px;">Actions</th>
-                </tr>
-              </thead>
-              <tbody id="rotation-pool-tbody">
-                <tr><td colspan="7" class="text-center py-4 text-muted">No configurations in rotation pool. Add them from Configs Explorer.</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <!-- Rotation History Timeline Card -->
         <div class="glass-card">
-          <div class="card-header">
-            <h3 class="card-title">Recent Rotation History</h3>
-            <span id="rot-history-count" class="badge">0 switches</span>
-          </div>
           <div class="table-responsive">
             <table class="data-table">
               <thead>
                 <tr>
-                  <th style="width: 140px;">Time</th>
-                  <th style="width: 110px;">Trigger Type</th>
-                  <th>Switched From</th>
-                  <th>Switched To (Best)</th>
-                  <th style="width: 85px;">Protocol</th>
-                  <th style="width: 90px;">Latency</th>
-                  <th style="width: 85px;">Score</th>
-                  <th>Selection Reason</th>
+                  <th>Name</th>
+                  <th style="width: 80px;">Port</th>
+                  <th>Target</th>
+                  <th style="width: 130px;">Status</th>
+                  <th>Active Node</th>
+                  <th style="width: 90px;">Best</th>
+                  <th style="width: 280px;">Actions</th>
                 </tr>
               </thead>
-              <tbody id="rotation-history-tbody">
-                <tr><td colspan="8" class="text-center py-4 text-muted">No rotation cycles recorded yet.</td></tr>
+              <tbody id="profiles-tbody">
+                <tr><td colspan="7" class="text-muted text-center py-4">Loading profiles...</td></tr>
               </tbody>
             </table>
           </div>
         </div>
       </section>
 
-      <!-- 3. INGEST & PARSE VIEW -->
-      <section id="tab-ingest" class="tab-pane">
+      <!-- SOURCES VIEW -->
+      <section id="tab-sources" class="tab-pane">
         <div class="dashboard-header">
           <div>
-            <h1 class="page-title">Ingest & Parse</h1>
-            <p class="page-subtitle">Import subscriptions or paste proxy configurations with automatic deduplication</p>
+            <h1 class="page-title">Subscription Sources</h1>
+            <p class="page-subtitle">Velox fetches these on a schedule, parses and deduplicates every config, and drops ones that disappear</p>
+          </div>
+          <div class="actions-group">
+            <button id="btn-run-refresh" class="btn btn-secondary"><span class="icon">↻</span> Fetch all now</button>
           </div>
         </div>
 
-        <div class="two-col-grid">
-          <!-- Left Column: Inputs -->
-          <div class="glass-card">
-            <h3 class="card-title mb-3">Subscription URL Ingestion</h3>
-            <div class="form-group mb-4">
-              <label class="form-label" for="sub-url-input">Subscription URL</label>
-              <div class="input-group">
-                <input type="url" id="sub-url-input" class="form-input" placeholder="https://example.com/subscription.txt">
-                <button id="btn-fetch-sub" class="btn btn-primary">Fetch & Ingest</button>
-              </div>
-              <span class="text-muted text-xs mt-1">Supports base64 subscriptions, raw URI lists, and GitHub raw URLs.</span>
-            </div>
-
-            <hr class="divider">
-
-            <h3 class="card-title mb-3">Manual Paste</h3>
-            <div class="form-group mb-3">
-              <label class="form-label" for="paste-input">Paste Config URIs (one per line)</label>
-              <textarea id="paste-input" class="form-textarea" rows="8" placeholder="vless://...&#10;hysteria2://...&#10;trojan://...&#10;ss://...&#10;vmess://..."></textarea>
-            </div>
-            <button id="btn-parse-paste" class="btn btn-primary w-full">Parse & Deduplicate Into Database</button>
+        <div class="glass-card mb-4">
+          <label class="form-label" for="source-url-input">Subscription URL</label>
+          <div class="input-group">
+            <input type="url" id="source-url-input" class="form-input" placeholder="https://example.com/subscription.txt">
+            <button id="btn-add-source" class="btn btn-primary">Add Subscription</button>
           </div>
+          <span class="text-muted text-xs mt-1">Base64 subscriptions and plain URI lists (vless, vmess, trojan, ss, hysteria2) are supported.</span>
+        </div>
 
-          <!-- Right Column: Live Results -->
-          <div class="glass-card">
-            <h3 class="card-title mb-3">Ingestion Telemetry</h3>
-            <div id="ingest-results-box" class="ingest-empty-state">
-              <div class="empty-icon">📥</div>
-              <p>Ready to ingest. Enter a subscription URL or paste configs on the left to view parsing & deduplication telemetry.</p>
-            </div>
+        <div class="glass-card">
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>URL</th>
+                  <th style="width: 80px;">Enabled</th>
+                  <th style="width: 170px;">Last Fetched</th>
+                  <th style="width: 80px;">Configs</th>
+                  <th>Status</th>
+                  <th style="width: 90px;"></th>
+                </tr>
+              </thead>
+              <tbody id="sources-tbody">
+                <tr><td colspan="6" class="text-muted text-center py-4">Loading sources...</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </section>
@@ -664,7 +553,6 @@
                   <th>Endpoint</th>
                   <th style="width: 95px;">Latency</th>
                   <th>Stage / Verification Outcome</th>
-                  <th style="width: 100px;">Action</th>
                 </tr>
               </thead>
               <tbody id="benchmark-live-tbody">
@@ -710,8 +598,8 @@
                 <span id="db-path-display" class="text-mono text-xs">Loading...</span>
               </div>
               <div class="info-row">
-                <span class="text-muted">Active Proxy Port:</span>
-                <span class="text-mono">127.0.0.1:1080</span>
+                <span class="text-muted">Profile Listen Address:</span>
+                <span id="listen-addr-display" class="text-mono">—</span>
               </div>
             </div>
           </div>
@@ -804,8 +692,8 @@
                 <option value="all">All Subsystems</option>
                 <option value="engine">Engine</option>
                 <option value="pipeline">Pipeline</option>
-                <option value="proxy">Proxy</option>
-                <option value="ingest">Ingest</option>
+                <option value="optimizer">Optimizer</option>
+                <option value="profiles">Profiles</option>
                 <option value="storage">Storage</option>
                 <option value="web">Web Server</option>
                 <option value="system">System</option>

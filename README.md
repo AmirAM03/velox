@@ -2,8 +2,8 @@
 
 <div align="center">
 
-**High-performance V2Ray proxy engine & interactive embedded web dashboard.**  
-*Ingest, sanitize, deduplicate, benchmark, score, and route thousands of proxy nodes at speed.*
+**Self-hosted V2Ray jump server: subscriptions in, the best node per target service out.**  
+*Fetches, deduplicates and benchmarks thousands of free configs, then serves each target service on its own authenticated port.*
 
 [![Release](https://img.shields.io/github/v/release/AmirAM03/velox?style=flat-square&color=06b6d4)](https://github.com/AmirAM03/velox/releases)
 [![Go Version](https://img.shields.io/badge/Go-1.23%2B-blue?style=flat-square)](https://go.dev)
@@ -17,10 +17,8 @@
 ## 📑 Table of Contents
 
 - [Overview & Architecture](#-overview--architecture)
-- [🖥️ Interactive Web Dashboard](#️-interactive-web-dashboard)
+- [🖥️ Web Dashboard](#️-web-dashboard)
 - [⚡ Quick Start](#-quick-start)
-  - [Linux (Ubuntu / Debian / Arch / RHEL)](#linux-ubuntu--debian--arch--rhel)
-  - [Windows (amd64 / arm64)](#windows-amd64--arm64)
 - [🚀 CLI Command Reference](#-cli-command-reference)
 - [🌐 Supported Protocols & Transports](#-supported-protocols--transports)
 - [🎯 Real-World Delay Benchmarking](#-real-world-delay-benchmarking)
@@ -33,94 +31,67 @@
 
 ## ⚡ Overview & Architecture
 
-Velox is built from the ground up for power users, developers, and researchers managing large pools of proxy configurations. Unlike traditional GUI clients that wrap external background daemons, Velox embeds **Xray-core** directly in-process via Go API calls (`core.New` and `core.Dial`), resulting in:
+Velox runs on a Linux VPS as a **jump server**. It pulls V2Ray configs from the subscription links you give it, tests them against the services your users need, and exposes one authenticated proxy port per service. Users connect to the VPS; the VPS forwards each connection through the best node it found for that service.
 
-- **Zero Background Daemons**: Runs strictly in user-space when invoked; zero hidden background processes or system services.
-- **Microsecond In-Process Routing**: Direct memory piping without loopback proxy hop overhead or socket descriptor exhaustion.
-- **Cryptographic Deduplication**: Automatic SHA-256 canonical hashing eliminates identical configurations across multiple subscriptions.
-- **Multi-Stage Progressive Pipeline**: Filters dead nodes across 3 concurrent stages before running expensive real delay HTTP requests.
-- **Pure-Go SQLite WAL**: High-concurrency local persistence with zero CGO dependencies.
+- **Subscriptions only**: you add subscription URLs; Velox fetches them on a schedule, parses and deduplicates every config (SHA-256 canonical identity) and drops configs that no subscription lists any more.
+- **Profiles**: each profile is a target service (e.g. `https://www.youtube.com`) plus a public port, username and password. Users point any SOCKS5 or HTTP client at `VPS_IP:port`.
+- **Per-service ranking**: every cycle, cheap TCP/TLS checks run once over all configs; only the fastest 500 survivors get the real HTTP test, once per profile target. Each profile keeps its 10 best nodes and fails over to the next one when the active node stops answering.
+- **Embedded Xray-core**: no external binaries; one shared engine serves all profiles.
+- **Pure-Go SQLite (WAL)**: single static binary, no CGO.
 
 ```
- [ Subscriptions / Files / Stdin ]
-                 │
-                 ▼
- ┌───────────────────────────────┐
- │   Ingest & Cryptographic      │ ──► Canonical SHA-256 Deduplication
- │   Sanitization Pipeline       │
- └───────────────┬───────────────┘
-                 ▼
- ┌───────────────────────────────┐
- │    Pure-Go SQLite WAL DB      │ ──► Fast Indexed Queries & Scoring
- └───────────────┬───────────────┘
-                 │
-                 ▼
- ┌───────────────────────────────┐
- │  3-Stage Concurrent Pipeline  │
- │  • S0: DNS+TCP (2000 workers) │
- │  • S1: TLS/REALITY (500 wkr)  │
- │  • S2: In-Process HTTP (150)  │ ──► Real Delay (TTFB) against Google / Cloudflare
- └───────────────┬───────────────┘
-                 ▼
- ┌───────────────────────────────┐
- │   In-Process Xray Engine      │ ──► Mixed SOCKS5 + HTTP Inbound (127.0.0.1:1080)
- │   & Embedded Web Dashboard    │ ──► Zero-Dependency Modern Dark SPA (18080)
- └───────────────────────────────┘
+ Users ──► VPS_IP:20001 (profile "YouTube", user/pass) ──┐
+ Users ──► VPS_IP:20002 (profile "Telegram", user/pass) ─┤
+                                                         ▼
+                                       ┌──────────────────────────────┐
+  Subscription URLs ──► fetch, parse,  │  Velox (systemd service)     │
+  (every 6h)            deduplicate ──►│  • per-profile best nodes    │──► best V2Ray node ──► target service
+                                       │  • shared Xray engine        │
+                                       │  • dashboard on 127.0.0.1    │
+                                       └──────────────────────────────┘
+                     every 30m: TCP/TLS once for all configs ──► HTTP test per profile target ──► top 10 per profile
 ```
 
 ---
 
-## 🖥️ Interactive Web Dashboard
+## 🖥️ Web Dashboard
 
-Velox embeds a zero-dependency, modern dark-mode single-page application directly inside the compiled binary. Simply run `velox` (or `velox.exe`) without any arguments:
+All management happens in the embedded dashboard. It listens on `127.0.0.1:18080` only and has no login, so it is never exposed to the internet. Reach it through an SSH tunnel:
 
-```bash
-velox
-```
-
-It automatically starts on `http://127.0.0.1:18080` and opens your default browser:
-
-| Feature Tab | Capabilities |
-| :--- | :--- |
-| **Telemetry Overview** | Real-time proxy status, active node latency, working nodes tally, and database statistics. |
-| **Config Explorer** | Searchable & protocol-filtered table with **Working Only** filter, multi-criteria sorting (Score, Latency, Name, Protocol, Recency), one-click rotation pool toggling, and bulk selection. |
-| **Auto-Rotation Engine** | Periodic background benchmarking of a dedicated configuration pool (`1m`, `5m`, `15m`, `30m`, `1h`) with live countdown ticker and seamless, hot-switched activation of the fastest passing node on `127.0.0.1:1080`. |
-| **Ingest & Parse** | Dual-input ingestion for subscription URLs and raw configuration paste with cryptographic deduplication. |
-| **Live Benchmarks** | Multi-stage speed & latency tests against destination presets (`Google`, `Cloudflare`, `YouTube`, `GitHub`) with configurable parallel threads and real-time streaming. |
-| **Application Logs** | Persistent in-depth SQLite logs (`app_logs`) with keyword search, level/subsystem filtering, JSON attribute inspection, automated retention pruning, and export. |
-| **Proxy Control** | One-click connect / disconnect for the in-process proxy engine (`127.0.0.1:1080`) |
-
-The dashboard listens on `127.0.0.1` only and has no login. On a VPS, reach it through an SSH tunnel:
 ```bash
 ssh -L 18080:127.0.0.1:18080 user@your-vps   # then open http://127.0.0.1:18080 locally
 ```
+
+| Tab | What it does |
+| :--- | :--- |
+| **Dashboard** | Config counts, protocol mix, profile and optimizer status. |
+| **Profiles** | Create profiles (name, target URL, port, username, password), see each one's active node and latency, copy ready-to-use `socks5://` / `http://` URLs, set the test and fetch schedule, re-test on demand. |
+| **Sources** | Add, disable or delete subscription URLs; see last fetch time, config count and errors; fetch all now. |
+| **Configs** | Search, filter and sort every stored config. |
+| **Benchmark** | Edit the test methodology (TCP/TLS/HTTP steps, timeouts) used by the optimizer, and run manual benchmarks. |
+| **Application Logs** | Persistent logs with search, level/subsystem filters, retention and export. |
 
 ---
 
 ## ⚡ Quick Start
 
-### Linux (Ubuntu / Debian / Arch / RHEL)
-
-Install or upgrade to the latest release with a single command:
+### Linux VPS (Ubuntu / Debian / RHEL / Arch)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AmirAM03/velox/main/install.sh | sudo bash
 ```
 
-Then simply launch:
-```bash
-velox
-```
+This installs the binary, creates a `velox` system user and starts a hardened `velox` systemd service. Then:
 
-See the [Linux Deployment Guide](docs/ubuntu.md) for distribution setup and environment variable configuration.
+1. Open the SSH tunnel above and browse to `http://127.0.0.1:18080`.
+2. **Sources** tab: add your subscription URLs.
+3. **Profiles** tab: add one profile per target service.
+4. Open each profile port in the firewall, e.g. `sudo ufw allow 20001/tcp`.
+5. Give users `socks5://user:pass@VPS_IP:20001` (copy it from the Profiles tab).
 
-### Windows (amd64 / arm64)
+To install a binary you built yourself: `sudo bash install.sh --binary ./velox`. Logs: `journalctl -u velox -f`.
 
-1. Download the latest `velox-vX.Y.Z-windows-amd64.zip` from [GitHub Releases](https://github.com/AmirAM03/velox/releases).
-2. Extract `velox.exe` to any folder in your PATH (e.g. `C:\Tools\velox`).
-3. Run `velox.exe` in PowerShell or Command Prompt, then open `http://127.0.0.1:18080`.
-
-See the [Windows User Guide](docs/windows.md) for the PowerShell one-liner.
+See the [Linux Deployment Guide](docs/ubuntu.md) for details.
 
 ---
 
@@ -199,8 +170,7 @@ Benchmarking in Velox is fully transparent and user-defined rather than a fixed 
 
 For advanced deployments, performance tuning, and technical specifications:
 
-- 🐧 [**Linux / Ubuntu Deployment Guide**](docs/ubuntu.md) — One-liner install, APT proxy, and shell integration.
-- 🪟 [**Windows User Guide**](docs/windows.md) — Windows installation and PowerShell tips.
+- 🐧 [**Linux VPS Deployment Guide**](docs/ubuntu.md) — Install, dashboard tunnel, sources, profiles and operations.
 - 🔬 [**Architecture & Internals**](docs/architecture.md) — Pipeline mechanics, in-process core, and scoring math.
 - ⚙️ [**Configuration Manual**](docs/configuration.md) — Full `config.yaml` schema, tuning profiles, and overrides.
 

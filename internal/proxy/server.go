@@ -3,6 +3,8 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -21,6 +23,8 @@ import (
 type Server struct {
 	listenAddr string
 	port       int
+	username   string // empty means no auth (tests and loopback only)
+	password   string
 	engine     engine.Engine
 	selector   *Selector
 	logger     *slog.Logger
@@ -30,8 +34,9 @@ type Server struct {
 	done       chan struct{}
 }
 
-// NewServer creates a new mixed inbound proxy Server.
-func NewServer(listenAddr string, port int, eng engine.Engine, sel *Selector, logger *slog.Logger) *Server {
+// NewServer creates a new mixed inbound proxy Server. With a username set, clients
+// must authenticate (SOCKS5 RFC 1929 or HTTP Proxy-Authorization: Basic).
+func NewServer(listenAddr string, port int, username, password string, eng engine.Engine, sel *Selector, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -41,6 +46,8 @@ func NewServer(listenAddr string, port int, eng engine.Engine, sel *Selector, lo
 	return &Server{
 		listenAddr: listenAddr,
 		port:       port,
+		username:   username,
+		password:   password,
 		engine:     eng,
 		selector:   sel,
 		logger:     logger,
@@ -120,14 +127,14 @@ func (s *Server) acceptLoop() {
 func (s *Server) handleConn(clientConn net.Conn) {
 	defer clientConn.Close()
 
-	// Read first byte with timeout
-	_ = clientConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	// The whole handshake must finish in time; relay() clears the deadline.
+	// Without it, idle connections on a public port would pile up.
+	_ = clientConn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	reader := bufio.NewReader(clientConn)
 	firstByte, err := reader.Peek(1)
 	if err != nil {
 		return
 	}
-	_ = clientConn.SetReadDeadline(time.Time{}) // Clear deadline
 
 	if firstByte[0] == 0x05 {
 		// SOCKS5 protocol
@@ -156,8 +163,19 @@ func (s *Server) handleSOCKS5(clientConn net.Conn, reader *bufio.Reader) {
 		return
 	}
 
-	// 2. Select No Authentication Required (0x00)
-	if _, err := clientConn.Write([]byte{0x05, 0x00}); err != nil {
+	// 2. Pick the auth method: username/password (0x02) when configured, else none (0x00)
+	if s.username != "" {
+		if !bytesContain(methods, 0x02) {
+			_, _ = clientConn.Write([]byte{0x05, 0xFF})
+			return
+		}
+		if _, err := clientConn.Write([]byte{0x05, 0x02}); err != nil {
+			return
+		}
+		if !s.socksAuth(clientConn, reader) {
+			return
+		}
+	} else if _, err := clientConn.Write([]byte{0x05, 0x00}); err != nil {
 		return
 	}
 
@@ -229,6 +247,7 @@ func (s *Server) handleSOCKS5(clientConn net.Conn, reader *bufio.Reader) {
 
 	upstreamConn, err := s.engine.Dial(ctx, activeCfg, "tcp", destAddr)
 	if err != nil {
+		s.selector.RecordFailure(err.Error())
 		// General SOCKS server failure
 		_, _ = clientConn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		s.logger.Debug("socks5 dial upstream error", "dest", destAddr, "error", err)
@@ -252,6 +271,11 @@ func (s *Server) handleHTTP(clientConn net.Conn, reader *bufio.Reader) {
 		return
 	}
 
+	if s.username != "" && !s.httpAuthOK(req.Header.Get("Proxy-Authorization")) {
+		_, _ = clientConn.Write([]byte("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"velox\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+		return
+	}
+
 	activeCfg := s.selector.Active()
 	if activeCfg == nil {
 		resp := "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n\r\nNo active proxy config"
@@ -271,6 +295,7 @@ func (s *Server) handleHTTP(clientConn net.Conn, reader *bufio.Reader) {
 
 		upstreamConn, err := s.engine.Dial(ctx, activeCfg, "tcp", destAddr)
 		if err != nil {
+			s.selector.RecordFailure(err.Error())
 			resp := fmt.Sprintf("HTTP/1.1 502 Bad Gateway\r\n\r\nProxy error: %v", err)
 			_, _ = clientConn.Write([]byte(resp))
 			return
@@ -299,6 +324,7 @@ func (s *Server) handleHTTP(clientConn net.Conn, reader *bufio.Reader) {
 
 		upstreamConn, err := s.engine.Dial(ctx, activeCfg, "tcp", destAddr)
 		if err != nil {
+			s.selector.RecordFailure(err.Error())
 			resp := fmt.Sprintf("HTTP/1.1 502 Bad Gateway\r\n\r\nProxy error: %v", err)
 			_, _ = clientConn.Write([]byte(resp))
 			return
@@ -325,6 +351,8 @@ func (s *Server) handleHTTP(clientConn net.Conn, reader *bufio.Reader) {
 
 // relay copies data bidirectionally between client and upstream.
 func (s *Server) relay(clientConn net.Conn, clientReader *bufio.Reader, upstreamConn net.Conn) {
+	s.selector.RecordSuccess()
+	_ = clientConn.SetReadDeadline(time.Time{}) // handshake done; long-lived tunnels are fine now
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -355,4 +383,59 @@ func (s *Server) relay(clientConn net.Conn, clientReader *bufio.Reader, upstream
 	}()
 
 	wg.Wait()
+}
+
+// socksAuth runs the RFC 1929 username/password sub-negotiation.
+func (s *Server) socksAuth(conn net.Conn, r *bufio.Reader) bool {
+	ver, err := r.ReadByte()
+	if err != nil || ver != 0x01 {
+		return false
+	}
+	read := func() ([]byte, bool) {
+		n, err := r.ReadByte()
+		if err != nil {
+			return nil, false
+		}
+		b := make([]byte, n)
+		_, err = io.ReadFull(r, b)
+		return b, err == nil
+	}
+	user, ok1 := read()
+	pass, ok2 := read()
+	ok := ok1 && ok2 && s.credsOK(string(user), string(pass))
+	status := byte(0x00)
+	if !ok {
+		status = 0x01
+	}
+	_, _ = conn.Write([]byte{0x01, status})
+	return ok
+}
+
+// httpAuthOK checks a "Basic base64(user:pass)" Proxy-Authorization header.
+func (s *Server) httpAuthOK(header string) bool {
+	const prefix = "Basic "
+	if !strings.HasPrefix(header, prefix) {
+		return false
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(header, prefix))
+	if err != nil {
+		return false
+	}
+	user, pass, ok := strings.Cut(string(raw), ":")
+	return ok && s.credsOK(user, pass)
+}
+
+func (s *Server) credsOK(user, pass string) bool {
+	u := subtle.ConstantTimeCompare([]byte(user), []byte(s.username))
+	p := subtle.ConstantTimeCompare([]byte(pass), []byte(s.password))
+	return u&p == 1
+}
+
+func bytesContain(b []byte, v byte) bool {
+	for _, x := range b {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }

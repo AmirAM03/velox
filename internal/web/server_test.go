@@ -3,6 +3,9 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +16,7 @@ import (
 	"github.com/AmirAM03/velox/internal/config"
 	loggerPkg "github.com/AmirAM03/velox/internal/logger"
 	"github.com/AmirAM03/velox/internal/model"
+	"github.com/AmirAM03/velox/internal/pipeline"
 	"github.com/AmirAM03/velox/internal/storage"
 )
 
@@ -24,6 +28,7 @@ func setupTestServer(t *testing.T) (*Server, *storage.Store, *loggerPkg.DBHandle
 	}
 
 	cfg := config.DefaultConfig()
+	cfg.Proxy.ListenAddr = "127.0.0.1" // keep test listeners off public interfaces
 	dbHandler := loggerPkg.NewDBHandler(loggerPkg.Config{
 		Store: store,
 		Level: slog.LevelDebug,
@@ -203,96 +208,6 @@ func TestServer_ConfigsFilteringAndSorting(t *testing.T) {
 	}
 }
 
-func TestServer_RotationEndpoints(t *testing.T) {
-	srv, store, dbHandler := setupTestServer(t)
-	defer store.Close()
-	defer dbHandler.Close()
-
-	// Seed configs and scores
-	_ = store.UpsertConfig(&model.ProxyConfig{ID: "node-1", Name: "N1", Protocol: model.ProtocolVLESS, Address: "1.1.1.1", Port: 443})
-	_ = store.UpsertConfig(&model.ProxyConfig{ID: "node-2", Name: "N2", Protocol: model.ProtocolVMess, Address: "2.2.2.2", Port: 443})
-	_ = store.UpsertScore(&model.Score{ConfigID: "node-1", Composite: 25, LatencyScore: 25, SuccessScore: 0.0})
-
-	// 1. Add node-1 and node-2 to rotation pool
-	addBody, _ := json.Marshal(map[string]any{
-		"config_ids": []string{"node-1", "node-2"},
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/rotation/pool/add", bytes.NewReader(addBody))
-	w := httptest.NewRecorder()
-	srv.handleRotationPoolAdd(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("handleRotationPoolAdd status = %d", w.Code)
-	}
-
-	// 2. Query pool
-	req = httptest.NewRequest(http.MethodGet, "/api/rotation/pool", nil)
-	w = httptest.NewRecorder()
-	srv.handleRotationPool(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("handleRotationPool status = %d", w.Code)
-	}
-	var poolResp struct {
-		Total   int64 `json:"total"`
-		Working int64 `json:"working"`
-	}
-	_ = json.Unmarshal(w.Body.Bytes(), &poolResp)
-	if poolResp.Total != 2 || poolResp.Working != 1 {
-		t.Errorf("expected pool total=2, working=1, got %+v", poolResp)
-	}
-
-	// 3. Configure rotation
-	cfgBody, _ := json.Marshal(map[string]any{
-		"enabled":  true,
-		"interval": "5m",
-	})
-	req = httptest.NewRequest(http.MethodPost, "/api/rotation/config", bytes.NewReader(cfgBody))
-	w = httptest.NewRecorder()
-	srv.handleRotationConfig(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("handleRotationConfig status = %d", w.Code)
-	}
-	var rotStatus RotationStatus
-	_ = json.Unmarshal(w.Body.Bytes(), &rotStatus)
-	if !rotStatus.Enabled || rotStatus.Interval != "5m" {
-		t.Errorf("expected rotation enabled with 5m interval, got %+v", rotStatus)
-	}
-
-	// 4. Remove node-2
-	remBody, _ := json.Marshal(map[string]any{
-		"config_id": "node-2",
-	})
-	req = httptest.NewRequest(http.MethodPost, "/api/rotation/pool/remove", bytes.NewReader(remBody))
-	w = httptest.NewRecorder()
-	srv.handleRotationPoolRemove(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("handleRotationPoolRemove status = %d", w.Code)
-	}
-
-	// 5. Clear pool
-	req = httptest.NewRequest(http.MethodPost, "/api/rotation/pool/clear", nil)
-	w = httptest.NewRecorder()
-	srv.handleRotationPoolClear(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("handleRotationPoolClear status = %d", w.Code)
-	}
-	tot, _, _ := store.GetRotationPoolStats()
-	if tot != 0 {
-		t.Errorf("expected 0 configs in pool after clear, got %d", tot)
-	}
-
-	// 6. Add working to pool
-	req = httptest.NewRequest(http.MethodPost, "/api/rotation/pool/add-working", nil)
-	w = httptest.NewRecorder()
-	srv.handleRotationPoolAddWorking(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("handleRotationPoolAddWorking status = %d", w.Code)
-	}
-	tot, _, _ = store.GetRotationPoolStats()
-	if tot != 1 {
-		t.Errorf("expected 1 working config added to pool, got %d", tot)
-	}
-}
-
 func TestServer_BenchmarkMethodologyEndpoints(t *testing.T) {
 	srv, store, dbHandler := setupTestServer(t)
 	defer store.Close()
@@ -425,24 +340,87 @@ func TestLocalOnly(t *testing.T) {
 	}
 }
 
-func TestRotation_SignalModeHasNoTimer(t *testing.T) {
+func TestServer_ProfileAndSourceAPI(t *testing.T) {
 	srv, store, dbHandler := setupTestServer(t)
 	defer store.Close()
 	defer dbHandler.Close()
+	defer srv.Close()
 
-	if err := srv.rotationMgr.Configure(true, "signal", "5m"); err != nil {
-		t.Fatal(err)
-	}
-	st := srv.rotationMgr.GetStatus()
-	if st.Mode != "signal" || st.NextRotationAt != nil {
-		t.Errorf("signal mode: mode=%q next=%v, want signal and no timer", st.Mode, st.NextRotationAt)
+	post := func(h http.HandlerFunc, body any) *httptest.ResponseRecorder {
+		b, _ := json.Marshal(body)
+		w := httptest.NewRecorder()
+		h(w, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(b)))
+		return w
 	}
 
-	// A bad interval must not half-apply the other settings.
-	if err := srv.rotationMgr.Configure(true, "periodic", "1s"); err == nil {
-		t.Fatal("expected error for 1s interval")
+	// Sources: only http(s) URLs, no duplicates.
+	if w := post(srv.handleSources, map[string]string{"url": "ftp://x"}); w.Code != http.StatusBadRequest {
+		t.Errorf("ftp source: got %d, want 400", w.Code)
 	}
-	if got := srv.rotationMgr.GetStatus().Mode; got != "signal" {
-		t.Errorf("mode changed to %q despite rejected config", got)
+	if w := post(srv.handleSources, map[string]string{"url": "https://example.com/sub"}); w.Code != http.StatusOK {
+		t.Fatalf("add source: %d %s", w.Code, w.Body)
+	}
+	if w := post(srv.handleSources, map[string]string{"url": "https://example.com/sub"}); w.Code != http.StatusConflict {
+		t.Errorf("duplicate source: got %d, want 409", w.Code)
+	}
+
+	// Profiles: credentials are mandatory because the port is public.
+	noAuth := storage.Profile{Name: "yt", TargetURL: "youtube.com", Port: 0, Enabled: true}
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	noAuth.Port = ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	if w := post(srv.handleProfiles, noAuth); w.Code != http.StatusBadRequest {
+		t.Errorf("profile without credentials: got %d, want 400", w.Code)
+	}
+	good := noAuth
+	good.Username, good.Password = "u", "p"
+	if w := post(srv.handleProfiles, good); w.Code != http.StatusOK {
+		t.Fatalf("create profile: %d %s", w.Code, w.Body)
+	}
+	st, _ := srv.profiles.Status()
+	if len(st) != 1 || !st[0].Running || st[0].TargetURL != "https://youtube.com" {
+		t.Fatalf("profile status = %+v, want one running profile with normalized target", st)
+	}
+	// The listener must demand auth.
+	c, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", good.Port))
+	if err != nil {
+		t.Fatalf("profile port not listening: %v", err)
+	}
+	c.Write([]byte{0x05, 0x01, 0x00})
+	reply := make([]byte, 2)
+	io.ReadFull(c, reply)
+	c.Close()
+	if reply[1] != 0xFF {
+		t.Errorf("no-auth SOCKS5 to profile port: got method %#x, want 0xFF", reply[1])
+	}
+
+	if w := post(srv.handleProfileDelete, map[string]int64{"id": st[0].ID}); w.Code != http.StatusOK {
+		t.Fatalf("delete profile: %d", w.Code)
+	}
+	if _, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", good.Port), time.Second); err == nil {
+		t.Error("listener still open after profile delete")
+	}
+}
+
+func TestOptimizer_SplitAndRank(t *testing.T) {
+	base, httpStep := splitChain(model.DefaultMethodologyChain())
+	if len(base) != 2 || httpStep.Type != model.MethodologyHTTPDelay {
+		t.Fatalf("split: base=%d http=%s", len(base), httpStep.Type)
+	}
+	for _, s := range base {
+		if !s.Necessary {
+			t.Errorf("base step %s must be a hard filter", s.ID)
+		}
+	}
+
+	mk := func(id string, ok bool, ms int) pipeline.Result {
+		return pipeline.Result{
+			Config:  &model.ProxyConfig{ID: id},
+			Results: []model.TestResult{{Success: ok, Latency: time.Duration(ms) * time.Millisecond}},
+		}
+	}
+	nodes, cfgs := rankProfileNodes([]pipeline.Result{mk("slow", true, 300), mk("dead", false, 10), mk("fast", true, 50)})
+	if len(nodes) != 2 || cfgs[0].ID != "fast" || nodes[0].Rank != 1 || nodes[1].ConfigID != "slow" {
+		t.Errorf("rank = %+v", nodes)
 	}
 }

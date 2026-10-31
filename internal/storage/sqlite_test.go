@@ -233,7 +233,7 @@ func TestStorage_LogsAndSettings(t *testing.T) {
 	}
 }
 
-func TestStorage_QueryConfigsAndRotationPool(t *testing.T) {
+func TestStorage_QueryConfigs(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "pool_test.db")
 	store, err := Open(dbPath, nil)
 	if err != nil {
@@ -321,69 +321,6 @@ func TestStorage_QueryConfigsAndRotationPool(t *testing.T) {
 	if len(itemsLat) != 3 || itemsLat[0].ID != "cfg-2" {
 		t.Errorf("expected cfg-2 first when sorted by latency desc, got %s", itemsLat[0].ID)
 	}
-
-	// 3. Test Rotation Pool: Add
-	added, err := store.AddToRotationPool([]string{cfg1.ID, cfg2.ID})
-	if err != nil {
-		t.Fatalf("AddToRotationPool: %v", err)
-	}
-	if added != 2 {
-		t.Errorf("expected 2 added to pool, got %d", added)
-	}
-
-	// Check pool items
-	poolConfigs, err := store.GetRotationPoolConfigs()
-	if err != nil {
-		t.Fatalf("GetRotationPoolConfigs: %v", err)
-	}
-	if len(poolConfigs) != 2 {
-		t.Fatalf("expected 2 pool configs, got %d", len(poolConfigs))
-	}
-
-	// Verify InPool flag reflects in QueryConfigs
-	queryItems, _, _ := store.QueryConfigs(ConfigQueryFilter{})
-	for _, it := range queryItems {
-		if (it.ID == cfg1.ID || it.ID == cfg2.ID) && !it.InPool {
-			t.Errorf("expected %s to have InPool=true", it.ID)
-		}
-		if it.ID == cfg3.ID && it.InPool {
-			t.Errorf("expected cfg-3 to have InPool=false")
-		}
-	}
-
-	// Test Pool stats
-	totPool, workPool, err := store.GetRotationPoolStats()
-	if err != nil || totPool != 2 || workPool != 2 {
-		t.Fatalf("unexpected pool stats: tot=%d, work=%d, err=%v", totPool, workPool, err)
-	}
-
-	// 4. Test Remove from Pool
-	rem, err := store.RemoveFromRotationPool([]string{cfg1.ID})
-	if err != nil || rem != 1 {
-		t.Fatalf("RemoveFromRotationPool: rem=%d, err=%v", rem, err)
-	}
-	poolAfterRem, _ := store.GetRotationPoolConfigs()
-	if len(poolAfterRem) != 1 || poolAfterRem[0].ID != cfg2.ID {
-		t.Fatalf("expected 1 remaining in pool (cfg-2), got %d", len(poolAfterRem))
-	}
-
-	// 5. Test AddWorkingConfigsToRotationPool
-	addedWork, err := store.AddWorkingConfigsToRotationPool("")
-	if err != nil {
-		t.Fatalf("AddWorkingConfigsToRotationPool: %v", err)
-	}
-	if addedWork != 1 { // cfg1 re-added, cfg2 already in pool
-		t.Errorf("expected 1 newly added working config, got %d", addedWork)
-	}
-
-	// 6. Test Clear pool
-	if err := store.ClearRotationPool(); err != nil {
-		t.Fatalf("ClearRotationPool: %v", err)
-	}
-	poolEmpty, _ := store.GetRotationPoolConfigs()
-	if len(poolEmpty) != 0 {
-		t.Fatalf("expected 0 pool configs after clear, got %d", len(poolEmpty))
-	}
 }
 
 func TestStore_BenchmarkMethodology(t *testing.T) {
@@ -438,3 +375,52 @@ func TestStore_BenchmarkMethodology(t *testing.T) {
 }
 
 
+
+func TestStore_ProfilesNodesAndPrune(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "prof.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	old := time.Now().Add(-10 * 24 * time.Hour)
+	stale := &model.ProxyConfig{ID: "stale", Protocol: model.ProtocolVLESS, Address: "1.1.1.1", Port: 1, CreatedAt: old, UpdatedAt: old}
+	used := &model.ProxyConfig{ID: "used", Protocol: model.ProtocolVLESS, Address: "2.2.2.2", Port: 1, CreatedAt: old, UpdatedAt: old}
+	fresh := &model.ProxyConfig{ID: "fresh", Protocol: model.ProtocolVLESS, Address: "3.3.3.3", Port: 1, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	if _, _, err := store.UpsertConfigs([]*model.ProxyConfig{stale, used, fresh}); err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := store.SaveProfile(Profile{Name: "p", TargetURL: "https://x", Port: 2000, Username: "u", Password: "p", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveProfile(Profile{Name: "dup", TargetURL: "https://x", Port: 2000, Username: "u", Password: "p"}); err == nil {
+		t.Error("expected unique-port error")
+	}
+	nodes := []ProfileNode{{ConfigID: "fresh", Rank: 2, LatencyMS: 90, TestedAt: time.Now()}, {ConfigID: "used", Rank: 1, LatencyMS: 40, TestedAt: time.Now()}}
+	if err := store.ReplaceProfileNodes(id, nodes); err != nil {
+		t.Fatal(err)
+	}
+	got, cfgs, err := store.ListProfileNodes(id)
+	if err != nil || len(got) != 2 || cfgs[0].ID != "used" || cfgs[1].ID != "fresh" {
+		t.Fatalf("ListProfileNodes = %+v %v %v, want rank order used, fresh", got, cfgs, err)
+	}
+
+	// Stale configs go, unless a profile still uses them.
+	pruned, err := store.PruneStaleConfigs(7 * 24 * time.Hour)
+	if err != nil || pruned != 1 {
+		t.Fatalf("pruned=%d err=%v, want 1", pruned, err)
+	}
+	if left, _ := store.GetConfigsByIDs([]string{"stale", "used", "fresh"}); len(left) != 2 {
+		t.Errorf("want used+fresh left, got %d configs", len(left))
+	}
+
+	// Deleting the profile cascades to its nodes.
+	if err := store.DeleteProfile(id); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := store.ListProfileNodes(id); len(got) != 0 {
+		t.Errorf("nodes left after profile delete: %d", len(got))
+	}
+}

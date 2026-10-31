@@ -44,20 +44,6 @@ func TestConfigValidation(t *testing.T) {
 			},
 			wantErr: true,
 		},
-		{
-			name: "invalid mixed port zero",
-			modify: func(c *Config) {
-				c.Proxy.MixedPort = 0
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid mixed port too high",
-			modify: func(c *Config) {
-				c.Proxy.MixedPort = 70000
-			},
-			wantErr: true,
-		},
 	}
 
 	for _, tt := range tests {

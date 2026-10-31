@@ -115,6 +115,12 @@ if [ -d "$DATA_DIR" ]; then
     success "Removed $DATA_DIR"
 fi
 
+# Remove the service user created by install.sh
+if id -u velox >/dev/null 2>&1; then
+    userdel velox 2>/dev/null || true
+    success "Removed system user 'velox'"
+fi
+
 # 6. Deep clean user directories if requested or present in home
 if [ "$PURGE_USER_DATA" = true ]; then
     info "Purging user-level directories..."

@@ -414,3 +414,10 @@ func (m *BenchmarkJobManager) runPipeline(ctx context.Context, configs []*model.
 		"current_stage": "Completed",
 	})
 }
+
+// Running reports whether a manual benchmark is in progress.
+func (m *BenchmarkJobManager) Running() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.status == StatusRunning
+}

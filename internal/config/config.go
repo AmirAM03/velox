@@ -59,15 +59,10 @@ type PipelineConfig struct {
 	QualityRounds int `mapstructure:"quality_rounds"` // Number of rounds for Stage 3
 }
 
-// ProxyConfig controls the local proxy server.
+// ProxyConfig controls the per-profile proxy listeners (ports are set per profile in the dashboard).
 type ProxyConfig struct {
-	ListenAddr   string `mapstructure:"listen_addr"`    // Listen address (default: 127.0.0.1)
-	SOCKSPort    int    `mapstructure:"socks_port"`     // SOCKS5 port
-	HTTPPort     int    `mapstructure:"http_port"`      // HTTP proxy port
-	MixedPort    int    `mapstructure:"mixed_port"`     // Mixed SOCKS5+HTTP port (preferred)
-	WarmPoolSize int    `mapstructure:"warm_pool_size"` // Number of configs kept warm
-	HealthInterval time.Duration `mapstructure:"health_interval"` // Health check interval
-	FailThreshold  int           `mapstructure:"fail_threshold"`  // Consecutive failures before failover
+	ListenAddr    string `mapstructure:"listen_addr"`    // Address profile ports bind to (default: 0.0.0.0)
+	FailThreshold int    `mapstructure:"fail_threshold"` // Consecutive dial failures before failing over to the next node
 }
 
 // TargetConfig holds test target URLs and settings.
@@ -135,11 +130,8 @@ func DefaultConfig() *Config {
 			QualityRounds:       5,
 		},
 		Proxy: ProxyConfig{
-			ListenAddr:     "127.0.0.1",
-			MixedPort:      1080,
-			WarmPoolSize:   5,
-			HealthInterval: 30 * time.Second,
-			FailThreshold:  2,
+			ListenAddr:    "0.0.0.0",
+			FailThreshold: 3,
 		},
 		Targets: TargetConfig{
 			URLs: []string{
@@ -178,9 +170,6 @@ func (c *Config) Validate() error {
 	}
 	if len(c.Targets.URLs) == 0 {
 		return fmt.Errorf("at least one target URL is required")
-	}
-	if c.Proxy.MixedPort <= 0 || c.Proxy.MixedPort > 65535 {
-		return fmt.Errorf("mixed_port must be 1-65535")
 	}
 	return nil
 }

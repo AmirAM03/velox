@@ -55,14 +55,11 @@ pipeline:
   per_host_cooldown: "500ms"    # Cooldown between batches to same host
 
 # ------------------------------------------------------------------------------
-# Local Mixed Inbound Proxy Settings
+# Profile Proxy Listeners (ports, users and targets are set per profile in the dashboard)
 # ------------------------------------------------------------------------------
 proxy:
-  listen_addr: "127.0.0.1"      # Local bind IP address (use 0.0.0.0 for LAN sharing)
-  mixed_port: 1080              # Inbound port handling SOCKS5 and HTTP simultaneously
-  warm_pool_size: 5             # Number of top scored configs kept warm in memory
-  health_interval: "30s"        # Health check frequency on the active proxy node
-  fail_threshold: 2             # Consecutive failures before triggering auto-failover
+  listen_addr: "0.0.0.0"        # Address every profile port binds to
+  fail_threshold: 3             # Consecutive dial failures before failing over to the next-best node
 
 # ------------------------------------------------------------------------------
 # Target URLs for Real Delay & Delay Benchmarking

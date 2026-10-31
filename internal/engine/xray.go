@@ -129,3 +129,17 @@ func (e *XrayEngine) Close() error {
 	e.pool = make(map[string]*core.Instance)
 	return firstErr
 }
+
+// Retain closes every cached instance whose config ID is not in keep.
+// The long-lived serving engine calls this after each cycle so instances for
+// nodes no profile uses any more do not pile up.
+func (e *XrayEngine) Retain(keep map[string]bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for id, inst := range e.pool {
+		if !keep[id] {
+			_ = inst.Close()
+			delete(e.pool, id)
+		}
+	}
+}

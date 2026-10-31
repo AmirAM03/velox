@@ -13,10 +13,7 @@ const app = {
     configsSearch: '',
     configsWorkingOnly: false,
     configsSortBy: 'score',
-    configsSelectedIds: new Set(),
-    rotationStatus: null,
-    rotationCountdownTimer: null,
-    isConnecting: false,
+    profiles: [],
     eventSource: null,
     benchmarkRunning: false,
     benchmarkTotal: 0,
@@ -46,16 +43,13 @@ const app = {
     this.refreshStatus();
     this.loadTopNodes();
     this.loadLogStats();
-    this.loadRotationStatus();
-    this.startRotationTicker();
     this.loadMethodology();
     
     // Poll status periodically every 3 seconds
     setInterval(() => {
       this.refreshStatus();
-      if (this.state.activeTab === 'rotation') {
-        this.loadRotationStatus();
-      }
+      if (this.state.activeTab === 'profiles') this.loadProfiles();
+      if (this.state.activeTab === 'sources') this.loadSources();
     }, 3000);
   },
 
@@ -72,15 +66,6 @@ const app = {
       this.refreshStatus();
       this.loadTopNodes();
       this.showToast('Data refreshed', 'info');
-    });
-
-    // Quick Connect toggle in header
-    document.getElementById('quick-toggle-btn')?.addEventListener('click', () => {
-      if (this.state.status && this.state.status.active_config) {
-        this.disconnectProxy();
-      } else {
-        this.connectProxy('');
-      }
     });
 
     // Protocol filter pills in Configs view
@@ -113,60 +98,6 @@ const app = {
       this.loadConfigs();
     });
 
-    // Select all visible configs checkbox
-    document.getElementById('configs-check-all')?.addEventListener('change', (e) => {
-      const checked = e.target.checked;
-      document.querySelectorAll('.config-row-check').forEach(cb => {
-        cb.checked = checked;
-        const id = cb.dataset.id;
-        if (checked) {
-          this.state.configsSelectedIds.add(id);
-        } else {
-          this.state.configsSelectedIds.delete(id);
-        }
-      });
-      this.updateBulkToolbar();
-    });
-
-    // Bulk Add Selected to Pool
-    document.getElementById('btn-bulk-add-pool')?.addEventListener('click', async () => {
-      const ids = Array.from(this.state.configsSelectedIds);
-      if (ids.length === 0) return;
-      await this.addConfigsToPool(ids);
-    });
-
-    // Bulk Add Working to Pool
-    const addWorkingAction = async () => {
-      await this.addWorkingToPool();
-    };
-    document.getElementById('btn-bulk-add-working')?.addEventListener('click', addWorkingAction);
-    document.getElementById('btn-pool-add-working')?.addEventListener('click', addWorkingAction);
-
-    // Clear Pool
-    document.getElementById('btn-pool-clear')?.addEventListener('click', async () => {
-      if (!confirm('Clear all configurations from the auto-rotation pool?')) return;
-      await this.clearRotationPool();
-    });
-
-    // Master Rotation Toggle
-    document.getElementById('toggle-rotation-enabled')?.addEventListener('change', (e) => {
-      this.saveRotationConfig({ enabled: e.target.checked });
-    });
-
-    // Save Rotation Parameters
-    document.getElementById('btn-save-rotation-cfg')?.addEventListener('click', () => {
-      const modeRadio = document.querySelector('input[name="rot-mode"]:checked');
-      const mode = modeRadio ? modeRadio.value : 'periodic';
-      const interval = document.getElementById('rot-interval-select')?.value || '15m';
-      const enabled = document.getElementById('toggle-rotation-enabled')?.checked || false;
-      this.saveRotationConfig({ enabled, mode, interval });
-    });
-
-    // Trigger Rotation Now (Signal)
-    document.getElementById('btn-rotation-trigger')?.addEventListener('click', async () => {
-      await this.triggerRotationNow();
-    });
-
     // Search input
     let searchTimeout = null;
     document.getElementById('configs-search-input')?.addEventListener('input', (e) => {
@@ -188,26 +119,6 @@ const app = {
     document.getElementById('btn-next-page')?.addEventListener('click', () => {
       this.state.configsPage++;
       this.loadConfigs();
-    });
-
-    // Ingest: Fetch Subscription
-    document.getElementById('btn-fetch-sub')?.addEventListener('click', () => {
-      const url = document.getElementById('sub-url-input')?.value.trim();
-      if (!url) {
-        this.showToast('Please enter a subscription URL', 'error');
-        return;
-      }
-      this.ingestConfigs({ urls: [url] });
-    });
-
-    // Ingest: Paste Configs
-    document.getElementById('btn-parse-paste')?.addEventListener('click', () => {
-      const raw = document.getElementById('paste-input')?.value.trim();
-      if (!raw) {
-        this.showToast('Please paste one or more proxy URIs', 'error');
-        return;
-      }
-      this.ingestConfigs({ raw: raw });
     });
 
     // Benchmark Target Presets
@@ -280,6 +191,40 @@ const app = {
         this.state.activeLogLevel = btn.dataset.level;
         this.renderLogs();
       });
+    });
+
+    // Sources
+    document.getElementById('btn-add-source')?.addEventListener('click', () => this.addSource());
+    document.getElementById('btn-run-refresh')?.addEventListener('click', () => this.runOptimizer('refresh'));
+
+    // Profiles & optimizer schedule
+    document.getElementById('btn-save-profile')?.addEventListener('click', () => this.saveProfile());
+    document.getElementById('btn-reset-profile')?.addEventListener('click', () => this.resetProfileForm());
+    document.getElementById('btn-gen-password')?.addEventListener('click', () => {
+      const bytes = crypto.getRandomValues(new Uint8Array(12));
+      document.getElementById('profile-password').value = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    });
+    document.getElementById('btn-run-cycle')?.addEventListener('click', () => this.runOptimizer('cycle'));
+    document.getElementById('btn-save-schedule')?.addEventListener('click', () => this.saveSchedule());
+
+    // Row actions: rows carry data-action + data-id, never untrusted data inside inline JS.
+    document.addEventListener('click', (e) => {
+      const el = e.target.closest('[data-action]');
+      if (!el || el.tagName === 'INPUT') return;
+      const id = el.dataset.id;
+      switch (el.dataset.action) {
+        case 'profile-edit': this.editProfile(Number(id)); break;
+        case 'profile-delete': this.deleteProfile(Number(id)); break;
+        case 'profile-copy': this.copyProfileURL(Number(id), el.dataset.scheme); break;
+        case 'source-delete': this.deleteSource(Number(id)); break;
+        case 'config-copy': this.copyURI((this.state.configs[Number(id)] || {}).raw_uri); break;
+        case 'log-copy': this.copyLogJSON(Number(id)); break;
+      }
+    });
+    document.addEventListener('change', (e) => {
+      if (e.target.dataset.action === 'source-toggle') {
+        this.toggleSource(Number(e.target.dataset.id), e.target.checked);
+      }
     });
 
     // Deduplication tool
@@ -377,9 +322,10 @@ const app = {
 
     if (tabId === 'configs') {
       this.loadConfigs();
-    } else if (tabId === 'rotation') {
-      this.loadRotationStatus();
-      this.loadRotationPool();
+    } else if (tabId === 'profiles') {
+      this.loadProfiles();
+    } else if (tabId === 'sources') {
+      this.loadSources();
     } else if (tabId === 'logs') {
       this.loadLogs();
       this.loadLogStats();
@@ -405,32 +351,16 @@ const app = {
     const totalElem = document.getElementById('stat-total-configs');
     if (totalElem) totalElem.textContent = (data.total_configs || 0).toLocaleString();
 
-    // Active Proxy
-    const pill = document.getElementById('proxy-status-pill');
-    const statusText = document.getElementById('proxy-status-text');
-    const activeNode = document.getElementById('stat-active-node');
-    const toggleBtn = document.getElementById('quick-toggle-btn');
-    const activePort = document.getElementById('stat-active-port');
-
-    if (data.active_config) {
-      if (pill) { pill.className = 'status-pill active'; }
-      if (statusText) statusText.textContent = `Connected (${data.active_config.protocol})`;
-      if (activeNode) activeNode.textContent = data.active_config.name || `${data.active_config.address}:${data.active_config.port}`;
-      if (toggleBtn) {
-        toggleBtn.textContent = 'Disconnect';
-        toggleBtn.className = 'btn btn-danger btn-sm';
-      }
-      if (activePort) activePort.textContent = `Endpoint: 127.0.0.1:${data.mixed_port || 1080}`;
-    } else {
-      if (pill) { pill.className = 'status-pill idle'; }
-      if (statusText) statusText.textContent = 'Proxy: Disconnected';
-      if (activeNode) activeNode.textContent = 'None';
-      if (toggleBtn) {
-        toggleBtn.textContent = 'Connect Best';
-        toggleBtn.className = 'btn btn-primary btn-sm';
-      }
-      if (activePort) activePort.textContent = 'Endpoint: 127.0.0.1:1080 (Idle)';
-    }
+    // Profiles & optimizer
+    const profiles = data.profiles || [];
+    const running = profiles.filter(p => p.running).length;
+    const profElem = document.getElementById('stat-profiles');
+    if (profElem) profElem.textContent = `${running} / ${profiles.length} running`;
+    const srcElem = document.getElementById('stat-sources');
+    if (srcElem) srcElem.textContent = `${(data.sources || []).length} sources`;
+    this.renderOptimizer(data.optimizer);
+    const listenElem = document.getElementById('listen-addr-display');
+    if (listenElem) listenElem.textContent = data.listen_addr || '—';
 
     // Benchmark stats
     const testedElem = document.getElementById('stat-tested-count');
@@ -503,26 +433,23 @@ const app = {
       if (!tbody) return;
 
       if (!configs || configs.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="7" class="text-muted text-center py-4">No configurations in database. Go to Ingest & Parse tab.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="text-muted text-center py-4">No configurations yet. Add a subscription in the Sources tab.</td></tr>`;
         return;
       }
 
       tbody.innerHTML = configs.map((cfg, idx) => {
         const scoreStr = (cfg.score !== undefined && cfg.score !== null) ? cfg.score.toFixed(3) : '—';
         const latStr = (cfg.latency_ms !== undefined && cfg.latency_ms !== null) ? `${Math.round(cfg.latency_ms)} ms` : '—';
-        const badgeClass = `badge-${cfg.protocol}`;
+        const proto = this.escapeHtml(cfg.protocol);
 
         return `
           <tr>
             <td class="text-muted font-bold">${idx + 1}</td>
-            <td><span class="badge ${badgeClass}">${cfg.protocol}</span></td>
+            <td><span class="badge badge-${proto}">${proto}</span></td>
             <td class="font-medium">${this.escapeHtml(cfg.name || `${cfg.address}:${cfg.port}`)}</td>
-            <td class="text-mono text-sm">${cfg.address}:${cfg.port}</td>
+            <td class="text-mono text-sm">${this.escapeHtml(cfg.address)}:${Number(cfg.port)}</td>
             <td><span class="text-mono">${scoreStr}</span></td>
             <td><span class="text-mono ${cfg.latency_ms ? 'text-success' : ''}">${latStr}</span></td>
-            <td>
-              <button class="btn btn-secondary btn-sm" onclick="app.connectProxy('${cfg.id}')">Connect</button>
-            </td>
           </tr>
         `;
       }).join('');
@@ -547,55 +474,38 @@ const app = {
       const data = await res.json();
       const configs = data.configs || [];
       const total = data.total || 0;
+      this.state.configs = configs;
 
       const tbody = document.getElementById('all-configs-tbody');
       if (!tbody) return;
 
       if (configs.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="9" class="text-muted text-center py-4">No configs match your filter.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="text-muted text-center py-4">No configs match your filter.</td></tr>`;
       } else {
         tbody.innerHTML = configs.map((cfg, idx) => {
           const rank = offset + idx + 1;
           const scoreStr = (cfg.score !== undefined && cfg.score !== null) ? cfg.score.toFixed(3) : '—';
           const latStr = (cfg.latency_ms !== undefined && cfg.latency_ms !== null) ? `${Math.round(cfg.latency_ms)} ms` : '—';
           const latColor = cfg.latency_ms ? (cfg.latency_ms < 300 ? 'text-success' : 'text-amber') : 'text-muted';
-          const badgeClass = `badge-${cfg.protocol}`;
-          const transportInfo = `${cfg.network || 'tcp'} / ${cfg.security || 'none'}`;
-          const isSelected = this.state.configsSelectedIds.has(cfg.id);
-          const poolBtn = cfg.in_pool
-            ? `<button class="btn-pool in-pool" onclick="app.toggleConfigPool('${cfg.id}', true)" title="Remove from Auto-Rotation Pool">✓ In Pool</button>`
-            : `<button class="btn-pool" onclick="app.toggleConfigPool('${cfg.id}', false)" title="Add to Auto-Rotation Pool">+ Pool</button>`;
+          const proto = this.escapeHtml(cfg.protocol);
+          const transportInfo = this.escapeHtml(`${cfg.network || 'tcp'} / ${cfg.security || 'none'}`);
 
           return `
             <tr>
-              <td>
-                <input type="checkbox" class="config-row-check" data-id="${cfg.id}" ${isSelected ? 'checked' : ''} onchange="app.onConfigRowCheck(this, '${cfg.id}')">
-              </td>
               <td class="text-muted font-bold">${rank}</td>
-              <td><span class="badge ${badgeClass}">${cfg.protocol}</span></td>
+              <td><span class="badge badge-${proto}">${proto}</span></td>
               <td class="font-medium">${this.escapeHtml(cfg.name || 'Unnamed Node')}</td>
-              <td class="text-mono text-sm">${cfg.address}:${cfg.port}</td>
+              <td class="text-mono text-sm">${this.escapeHtml(cfg.address)}:${Number(cfg.port)}</td>
               <td class="text-xs text-muted">${transportInfo}</td>
               <td><span class="text-mono ${latColor}">${latStr}</span></td>
               <td><span class="text-mono">${scoreStr}</span></td>
               <td>
-                <div style="display: flex; gap: 0.35rem; align-items: center;">
-                  <button class="btn btn-secondary btn-sm" onclick="app.connectProxy('${cfg.id}')" title="Connect">Connect</button>
-                  ${poolBtn}
-                  <button class="btn btn-secondary btn-sm" onclick="app.copyURI('${this.escapeHtml(cfg.raw_uri)}')" title="Copy URI">📋</button>
-                </div>
+                <button class="btn btn-secondary btn-sm" data-action="config-copy" data-id="${idx}" title="Copy URI">📋 Copy</button>
               </td>
             </tr>
           `;
         }).join('');
       }
-
-      // Check-all status
-      const checkAll = document.getElementById('configs-check-all');
-      if (checkAll) {
-        checkAll.checked = configs.length > 0 && configs.every(c => this.state.configsSelectedIds.has(c.id));
-      }
-      this.updateBulkToolbar();
 
       // Pagination controls
       const countInfo = document.getElementById('configs-count-info');
@@ -612,64 +522,6 @@ const app = {
 
     } catch (e) {
       console.error('Failed to load configs', e);
-    }
-  },
-
-  async ingestConfigs(payload) {
-    const box = document.getElementById('ingest-results-box');
-    if (box) {
-      box.innerHTML = `<div class="text-center py-4"><div class="empty-icon">⏳</div><p>Ingesting, parsing and deduplicating configurations...</p></div>`;
-    }
-
-    try {
-      const res = await fetch('/api/parse', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Ingest failed');
-
-      if (box) {
-        box.innerHTML = `
-          <div class="result-card">
-            <div class="result-header">
-              <span class="font-bold text-success">✅ Ingestion Complete</span>
-              <span class="badge badge-vless">${data.parsed} Valid Configs</span>
-            </div>
-            <div class="result-grid">
-              <div class="result-metric">
-                <div class="result-metric-label">New Inserted</div>
-                <div class="result-metric-val" style="color: var(--accent-emerald);">${data.inserted}</div>
-              </div>
-              <div class="result-metric">
-                <div class="result-metric-label">Existing Updated</div>
-                <div class="result-metric-val" style="color: var(--accent-cyan);">${data.updated}</div>
-              </div>
-              <div class="result-metric">
-                <div class="result-metric-label">Batch Dups Skipped</div>
-                <div class="result-metric-val" style="color: var(--accent-amber);">${data.batch_duplicates || 0}</div>
-              </div>
-              <div class="result-metric">
-                <div class="result-metric-label">Parse Failures</div>
-                <div class="result-metric-val" style="color: var(--accent-rose);">${data.failures || 0}</div>
-              </div>
-            </div>
-          </div>
-          <div class="text-muted text-xs">
-            Deduplication Verified: All stored configs represent strictly unique endpoints.
-          </div>
-        `;
-      }
-
-      this.showToast(`Imported ${data.inserted} new configs (${data.updated} existing updated)`, 'success');
-      this.refreshStatus();
-      this.loadTopNodes();
-    } catch (e) {
-      if (box) {
-        box.innerHTML = `<div class="text-center text-danger py-4"><p>❌ Error: ${e.message}</p></div>`;
-      }
-      this.showToast(e.message, 'error');
     }
   },
 
@@ -734,10 +586,9 @@ const app = {
       case 'complete':
         this.handleBenchmarkComplete(msg);
         break;
-      case 'rotation_status':
-        if (msg.status) {
-          this.renderRotationStatus(msg.status);
-        }
+      case 'optimizer_status':
+        this.renderOptimizer(msg.status);
+        if (this.state.activeTab === 'profiles') this.loadProfiles();
         break;
     }
   },
@@ -964,10 +815,6 @@ const app = {
       ? `<span class="badge badge-success">Passed</span>` 
       : `<span class="badge badge-danger" title="${this.escapeHtml(d.error || '')}">Fail (${this.escapeHtml(d.stage || '')})</span>`;
 
-    const actionBtn = d.success
-      ? `<button class="btn btn-primary btn-xs" onclick="app.connectProxy('${d.config_id}')">Connect</button>`
-      : `<span class="text-muted text-xs">—</span>`;
-
     return `
       <tr>
         <td>${statusBadge}</td>
@@ -975,10 +822,9 @@ const app = {
         <td>
           <div class="node-name-cell" title="${this.escapeHtml(d.name || d.address)}">${this.escapeHtml(d.name || d.address)}</div>
         </td>
-        <td><span class="text-mono text-xs text-muted">${this.escapeHtml(d.address)}:${d.port}</span></td>
+        <td><span class="text-mono text-xs text-muted">${this.escapeHtml(d.address)}:${Number(d.port)}</span></td>
         <td><span class="latency-badge ${latClass}">${latText}</span></td>
         <td><span class="text-xs text-muted" title="${this.escapeHtml(d.error || '')}">${this.escapeHtml(d.error ? (d.error.length > 25 ? d.error.substring(0, 25) + '...' : d.error) : d.stage)}</span></td>
-        <td>${actionBtn}</td>
       </tr>
     `;
   },
@@ -1086,36 +932,6 @@ const app = {
     }
   },
 
-  async connectProxy(configId) {
-    try {
-      this.showToast('Connecting to proxy node...', 'info');
-      const res = await fetch('/api/connect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config_id: configId })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Connection failed');
-
-      this.showToast(`Connected to ${data.name || 'node'} on port 1080`, 'success');
-      this.refreshStatus();
-    } catch (e) {
-      this.showToast(e.message, 'error');
-    }
-  },
-
-  async disconnectProxy() {
-    try {
-      const res = await fetch('/api/disconnect', { method: 'POST' });
-      if (!res.ok) throw new Error('Failed to disconnect');
-
-      this.showToast('Proxy disconnected', 'info');
-      this.refreshStatus();
-    } catch (e) {
-      this.showToast(e.message, 'error');
-    }
-  },
-
   async runDeduplication() {
     const btn = document.getElementById('btn-run-dedup');
     if (btn) btn.disabled = true;
@@ -1175,7 +991,7 @@ const app = {
 
   escapeHtml(str) {
     if (!str) return '';
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   },
 
   // ==========================================
@@ -1308,7 +1124,7 @@ const app = {
           <div class="log-drawer">
             <div class="log-drawer-header">
               <span class="text-xs text-muted font-bold">Log Record Attributes & Context</span>
-              <button class="btn btn-secondary btn-xs" onclick="event.stopPropagation(); app.copyToClipboard('${this.escapeHtml(prettyJSON).replace(/'/g, "\\'")}');">Copy JSON</button>
+              <button class="btn btn-secondary btn-xs" data-action="log-copy" data-id="${Number(log.id)}" onclick="event.stopPropagation()">Copy JSON</button>
             </div>
             <pre class="log-json-block">${this.escapeHtml(prettyJSON)}</pre>
           </div>
@@ -1431,283 +1247,135 @@ const app = {
   },
 
   // ==========================================================================
-  // CONFIGS SELECTION & ROTATION POOL METHODS
+  // SOURCES, PROFILES & OPTIMIZER
   // ==========================================================================
 
-  onConfigRowCheck(input, id) {
-    if (input.checked) {
-      this.state.configsSelectedIds.add(id);
-    } else {
-      this.state.configsSelectedIds.delete(id);
-    }
-    this.updateBulkToolbar();
+  async api(method, path, body) {
+    const res = await fetch(path, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `${method} ${path} failed (${res.status})`);
+    return data;
   },
 
-  updateBulkToolbar() {
-    const count = this.state.configsSelectedIds.size;
-    const badge = document.getElementById('bulk-selected-count');
-    const btn = document.getElementById('btn-bulk-add-pool');
-    if (badge) badge.textContent = `${count} items selected`;
-    if (btn) btn.disabled = count === 0;
+  fmtTime(t) {
+    return t ? new Date(t).toLocaleString() : '—';
   },
 
-  async toggleConfigPool(configId, currentlyInPool) {
+  copyLogJSON(id) {
+    const log = (this.state.appLogs || []).find(l => l.id === id);
+    if (log) this.copyToClipboard(JSON.stringify(log.attrs, null, 2));
+  },
+
+  async loadSources() {
     try {
-      const endpoint = currentlyInPool ? '/api/rotation/pool/remove' : '/api/rotation/pool/add';
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config_id: configId })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Pool update failed');
-      this.showToast(currentlyInPool ? 'Removed from rotation pool' : 'Added to rotation pool', 'success');
-      this.loadConfigs();
-      this.loadRotationStatus();
-      this.loadRotationPool();
+      this.renderSources(await this.api('GET', '/api/sources'));
     } catch (e) {
-      this.showToast(e.message, 'error');
+      console.error('Failed to load sources', e);
     }
   },
 
-  async addConfigsToPool(ids) {
-    try {
-      const res = await fetch('/api/rotation/pool/add', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config_ids: ids })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to add to pool');
-      this.showToast(`Added ${data.added || ids.length} nodes to rotation pool`, 'success');
-      this.state.configsSelectedIds.clear();
-      this.updateBulkToolbar();
-      this.loadConfigs();
-      this.loadRotationStatus();
-      this.loadRotationPool();
-    } catch (e) {
-      this.showToast(e.message, 'error');
-    }
-  },
-
-  async addWorkingToPool() {
-    try {
-      const proto = this.state.configsProto;
-      const url = proto ? `/api/rotation/pool/add-working?protocol=${proto}` : '/api/rotation/pool/add-working';
-      const res = await fetch(url, { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to add working nodes');
-      this.showToast(`Added ${data.added || 0} working nodes to rotation pool`, 'success');
-      this.loadConfigs();
-      this.loadRotationStatus();
-      this.loadRotationPool();
-    } catch (e) {
-      this.showToast(e.message, 'error');
-    }
-  },
-
-  async clearRotationPool() {
-    try {
-      const res = await fetch('/api/rotation/pool/clear', { method: 'POST' });
-      if (!res.ok) throw new Error('Failed to clear pool');
-      this.showToast('Rotation pool cleared', 'info');
-      this.loadConfigs();
-      this.loadRotationStatus();
-      this.loadRotationPool();
-    } catch (e) {
-      this.showToast(e.message, 'error');
-    }
-  },
-
-  onRotationModeChange(mode) {
-    const cardPeriodic = document.getElementById('rot-mode-card-periodic');
-    const cardSignal = document.getElementById('rot-mode-card-signal');
-    const intervalGroup = document.getElementById('rot-interval-form-group');
-    const timerLabel = document.getElementById('rot-stat-timer-label');
-    const timerIcon = document.getElementById('rot-stat-timer-icon');
-    const intervalBadge = document.getElementById('rot-stat-interval-badge');
-
-    if (mode === 'signal') {
-      if (cardPeriodic) cardPeriodic.classList.remove('active');
-      if (cardSignal) cardSignal.classList.add('active');
-      if (intervalGroup) intervalGroup.style.opacity = '0.4';
-      if (timerLabel) timerLabel.textContent = 'Signal Status';
-      if (timerIcon) timerIcon.textContent = '⚡';
-      if (intervalBadge) intervalBadge.textContent = 'Mode: Signal-Based (On-Demand)';
-      const countdownEl = document.getElementById('rot-stat-countdown');
-      if (countdownEl && (!this.state.rotationStatus || !this.state.rotationStatus.is_benchmarking)) {
-        countdownEl.textContent = 'Signal Ready';
-      }
-    } else {
-      if (cardPeriodic) cardPeriodic.classList.add('active');
-      if (cardSignal) cardSignal.classList.remove('active');
-      if (intervalGroup) intervalGroup.style.opacity = '1';
-      if (timerLabel) timerLabel.textContent = 'Next Rotation';
-      if (timerIcon) timerIcon.textContent = '⏱️';
-      const intervalVal = document.getElementById('rot-interval-select')?.value || '15m';
-      if (intervalBadge) intervalBadge.textContent = `Mode: Periodic (${intervalVal})`;
-    }
-  },
-
-  async saveRotationConfig(params) {
-    try {
-      const current = this.state.rotationStatus || {};
-      const payload = {
-        enabled: params.enabled !== undefined ? params.enabled : !!current.enabled,
-        mode: params.mode || current.mode || 'periodic',
-        interval: params.interval || current.interval || '15m',
-      };
-
-      const res = await fetch('/api/rotation/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to save configuration');
-      this.state.rotationStatus = data;
-      this.renderRotationStatus(data);
-      this.showToast(`Auto-rotation settings saved (${data.mode === 'signal' ? 'Signal-Based' : 'Periodic ' + data.interval})`, 'success');
-    } catch (e) {
-      this.showToast(e.message, 'error');
-    }
-  },
-
-  async triggerRotationNow() {
-    try {
-      const res = await fetch('/api/rotation/trigger', { method: 'POST' });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Trigger failed');
-      this.showToast('Rotation signal dispatched! Benchmarking pool via centralized methodology...', 'info');
-      this.loadRotationStatus();
-    } catch (e) {
-      this.showToast(e.message, 'error');
-    }
-  },
-
-  async loadRotationStatus() {
-    try {
-      const res = await fetch('/api/rotation/status');
-      if (!res.ok) return;
-      const data = await res.json();
-      this.state.rotationStatus = data;
-      this.renderRotationStatus(data);
-    } catch (e) {
-      console.error('Failed to load rotation status', e);
-    }
-  },
-
-  async loadRotationPool() {
-    try {
-      const res = await fetch('/api/rotation/pool');
-      if (!res.ok) return;
-      const data = await res.json();
-      this.renderRotationPool(data.configs || []);
-    } catch (e) {
-      console.error('Failed to load rotation pool', e);
-    }
-  },
-
-  renderRotationStatus(data) {
-    if (!data) return;
-    this.state.rotationStatus = data;
-
-    // Toggle & State
-    const toggle = document.getElementById('toggle-rotation-enabled');
-    const stateEl = document.getElementById('rot-stat-state');
-    const engineStateText = document.getElementById('rot-engine-state-text');
-    if (toggle) toggle.checked = !!data.enabled;
-    if (stateEl) {
-      if (data.is_benchmarking) {
-        stateEl.textContent = 'Benchmarking...';
-        stateEl.className = 'stat-value text-sm text-cyan';
-      } else if (data.enabled) {
-        stateEl.textContent = 'Active';
-        stateEl.className = 'stat-value text-sm text-emerald';
-      } else {
-        stateEl.textContent = 'Disabled';
-        stateEl.className = 'stat-value text-sm text-muted';
-      }
-    }
-    if (engineStateText) {
-      engineStateText.textContent = data.enabled ? 'Enabled & Active' : 'Disabled (Paused)';
-    }
-
-    // Mode handling
-    const mode = data.mode || 'periodic';
-    const radioPeriodic = document.querySelector('input[name="rot-mode"][value="periodic"]');
-    const radioSignal = document.querySelector('input[name="rot-mode"][value="signal"]');
-    if (mode === 'signal' && radioSignal) radioSignal.checked = true;
-    else if (radioPeriodic) radioPeriodic.checked = true;
-    this.onRotationModeChange(mode);
-
-    // Interval badge & select
-    const intervalSelect = document.getElementById('rot-interval-select');
-    if (intervalSelect && data.interval) intervalSelect.value = data.interval;
-
-    // Centralized Benchmark Info
-    const methodBadge = document.getElementById('rot-centralized-methodology-badge');
-    const targetLabel = document.getElementById('rot-centralized-target-label');
-    if (methodBadge && data.methodology_summary) {
-      methodBadge.textContent = data.methodology_summary;
-    }
-    if (targetLabel && data.target) {
-      targetLabel.textContent = data.target;
-    }
-
-    // Pool counts
-    const poolSize = document.getElementById('rot-stat-pool-size');
-    const workingBadge = document.getElementById('rot-stat-working-badge');
-    if (poolSize) poolSize.textContent = `${data.pool_size || 0} Nodes`;
-    if (workingBadge) workingBadge.textContent = `${data.working_in_pool || 0} Working`;
-
-    // Active node
-    const activeNodeEl = document.getElementById('rot-stat-active-node');
-    const activeMetricsEl = document.getElementById('rot-stat-active-metrics');
-    if (data.active_node) {
-      if (activeNodeEl) {
-        activeNodeEl.textContent = data.active_node.name || `${data.active_node.address}:${data.active_node.port}`;
-        activeNodeEl.title = data.active_node.name;
-      }
-      if (activeMetricsEl) {
-        activeMetricsEl.textContent = `${data.active_node.protocol} | Active`;
-      }
-    } else {
-      if (activeNodeEl) activeNodeEl.textContent = 'None';
-      if (activeMetricsEl) activeMetricsEl.textContent = '—';
-    }
-
-    // History count & table
-    const historyCount = document.getElementById('rot-history-count');
-    if (historyCount) historyCount.textContent = `${(data.history || []).length} switches`;
-    this.renderRotationHistory(data.history || []);
-  },
-
-  renderRotationPool(configs) {
-    const tbody = document.getElementById('rotation-pool-tbody');
+  renderSources(sources) {
+    const tbody = document.getElementById('sources-tbody');
     if (!tbody) return;
-
-    if (!configs || configs.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7" class="text-center py-4 text-muted">No configurations in rotation pool. Add them from Configs Explorer.</td></tr>`;
+    if (!sources.length) {
+      tbody.innerHTML = `<tr><td colspan="6" class="text-muted text-center py-4">No subscriptions yet. Add one above.</td></tr>`;
       return;
     }
+    tbody.innerHTML = sources.map(src => `
+      <tr>
+        <td class="text-mono text-xs" style="word-break: break-all;">${this.escapeHtml(src.url)}</td>
+        <td>
+          <label class="toggle-switch">
+            <input type="checkbox" data-action="source-toggle" data-id="${Number(src.id)}" ${src.enabled ? 'checked' : ''}>
+            <span class="slider"></span>
+          </label>
+        </td>
+        <td class="text-xs text-muted">${this.fmtTime(src.last_fetched_at)}</td>
+        <td class="text-mono">${Number(src.last_count)}</td>
+        <td class="text-xs">${src.last_error
+          ? `<span class="text-danger" title="${this.escapeHtml(src.last_error)}">⚠ ${this.escapeHtml(src.last_error.slice(0, 60))}</span>`
+          : (src.last_fetched_at ? '<span class="text-success">OK</span>' : '<span class="text-muted">Pending</span>')}</td>
+        <td><button class="btn btn-danger btn-sm" data-action="source-delete" data-id="${Number(src.id)}">Delete</button></td>
+      </tr>
+    `).join('');
+  },
 
-    tbody.innerHTML = configs.map((cfg, idx) => {
-      const scoreStr = (cfg.score !== undefined && cfg.score !== null) ? cfg.score.toFixed(3) : '—';
-      const latStr = (cfg.latency_ms !== undefined && cfg.latency_ms !== null) ? `${Math.round(cfg.latency_ms)} ms` : '—';
-      const badgeClass = `badge-${cfg.protocol}`;
+  async addSource() {
+    const input = document.getElementById('source-url-input');
+    const url = input?.value.trim();
+    if (!url) return this.showToast('Enter a subscription URL', 'error');
+    try {
+      await this.api('POST', '/api/sources', { url });
+      input.value = '';
+      this.showToast('Subscription added. Fetching now...', 'success');
+      this.loadSources();
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
 
+  async toggleSource(id, enabled) {
+    try {
+      await this.api('POST', '/api/sources/toggle', { id, enabled });
+    } catch (e) {
+      this.showToast(e.message, 'error');
+      this.loadSources();
+    }
+  },
+
+  async deleteSource(id) {
+    if (!confirm('Delete this subscription? Its configs are removed once they age out.')) return;
+    try {
+      await this.api('POST', '/api/sources/delete', { id });
+      this.loadSources();
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  async loadProfiles() {
+    try {
+      this.state.profiles = await this.api('GET', '/api/profiles');
+      this.renderProfiles();
+    } catch (e) {
+      console.error('Failed to load profiles', e);
+    }
+  },
+
+  renderProfiles() {
+    const tbody = document.getElementById('profiles-tbody');
+    if (!tbody) return;
+    const profiles = this.state.profiles || [];
+    if (!profiles.length) {
+      tbody.innerHTML = `<tr><td colspan="7" class="text-muted text-center py-4">No profiles yet. Create one with the form above.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = profiles.map(p => {
+      const best = p.nodes && p.nodes.length ? p.nodes[0] : null;
+      let state;
+      if (!p.enabled) state = '<span class="badge">Disabled</span>';
+      else if (p.error) state = `<span class="badge badge-danger" title="${this.escapeHtml(p.error)}">Error</span>`;
+      else if (!p.active_node) state = '<span class="badge badge-warning">Waiting for nodes</span>';
+      else state = '<span class="badge badge-success">Serving</span>';
+      const active = p.active_node ? this.escapeHtml(p.active_node.name || `${p.active_node.address}:${p.active_node.port}`) : '—';
       return `
         <tr>
-          <td class="text-muted font-bold">${idx + 1}</td>
-          <td><span class="badge ${badgeClass}">${cfg.protocol}</span></td>
-          <td class="font-medium">${this.escapeHtml(cfg.name || 'Unnamed')}</td>
-          <td class="text-mono text-sm">${cfg.address}:${cfg.port}</td>
-          <td><span class="text-mono ${cfg.latency_ms ? 'text-success' : ''}">${latStr}</span></td>
-          <td><span class="text-mono">${scoreStr}</span></td>
+          <td class="font-medium">${this.escapeHtml(p.name)}</td>
+          <td class="text-mono">${Number(p.port)}</td>
+          <td class="text-mono text-xs" style="word-break: break-all;">${this.escapeHtml(p.target_url)}</td>
+          <td>${state}</td>
+          <td class="text-xs">${active}<div class="text-muted">${(p.nodes || []).length} ranked nodes</div></td>
+          <td class="text-mono ${best ? 'text-success' : 'text-muted'}">${best ? Math.round(best.latency_ms) + ' ms' : '—'}</td>
           <td>
-            <div style="display: flex; gap: 0.35rem;">
-              <button class="btn btn-secondary btn-sm" onclick="app.connectProxy('${cfg.id}')" title="Connect Directly">Connect</button>
-              <button class="btn btn-danger btn-sm" onclick="app.toggleConfigPool('${cfg.id}', true)" title="Remove from pool">✕</button>
+            <div style="display: flex; gap: 0.35rem; flex-wrap: wrap;">
+              <button class="btn btn-secondary btn-sm" data-action="profile-copy" data-scheme="socks5" data-id="${Number(p.id)}" title="Copy SOCKS5 URL">SOCKS5</button>
+              <button class="btn btn-secondary btn-sm" data-action="profile-copy" data-scheme="http" data-id="${Number(p.id)}" title="Copy HTTP proxy URL">HTTP</button>
+              <button class="btn btn-secondary btn-sm" data-action="profile-edit" data-id="${Number(p.id)}">Edit</button>
+              <button class="btn btn-danger btn-sm" data-action="profile-delete" data-id="${Number(p.id)}">Delete</button>
             </div>
           </td>
         </tr>
@@ -1715,72 +1383,115 @@ const app = {
     }).join('');
   },
 
-  renderRotationHistory(history) {
-    const tbody = document.getElementById('rotation-history-tbody');
-    if (!tbody) return;
-
-    if (!history || history.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" class="text-center py-4 text-muted">No rotation cycles recorded yet.</td></tr>`;
-      return;
-    }
-
-    tbody.innerHTML = history.map(item => {
-      const t = new Date(item.timestamp).toLocaleTimeString();
-      const latStr = item.latency_ms > 0 ? `${Math.round(item.latency_ms)} ms` : '—';
-      const scoreStr = item.score > 0 ? item.score.toFixed(3) : '—';
-      const badgeClass = `badge-${item.protocol}`;
-      const triggerBadge = item.trigger_type === 'signal'
-        ? `<span class="badge badge-cyan" title="Triggered manually via Web UI or signal API">⚡ Signal</span>`
-        : `<span class="badge badge-purple" title="Triggered automatically via scheduled interval timer">⏱️ Periodic</span>`;
-
-      return `
-        <tr>
-          <td class="text-mono text-xs text-muted">${t}</td>
-          <td>${triggerBadge}</td>
-          <td class="text-muted text-sm truncate" title="${this.escapeHtml(item.from_node)}">${this.escapeHtml(item.from_node || 'None')}</td>
-          <td class="font-semibold text-emerald truncate" title="${this.escapeHtml(item.to_node)}">${this.escapeHtml(item.to_node)}</td>
-          <td><span class="badge ${badgeClass}">${item.protocol}</span></td>
-          <td><span class="text-mono text-success">${latStr}</span></td>
-          <td><span class="text-mono">${scoreStr}</span></td>
-          <td class="text-xs text-muted">${this.escapeHtml(item.reason || 'Best score')}</td>
-        </tr>
-      `;
-    }).join('');
+  serverHost() {
+    const addr = this.state.status && this.state.status.listen_addr;
+    return addr && addr !== '0.0.0.0' && addr !== '::' ? addr : 'SERVER_IP';
   },
 
-  startRotationTicker() {
-    if (this.state.rotationCountdownTimer) clearInterval(this.state.rotationCountdownTimer);
-    this.state.rotationCountdownTimer = setInterval(() => {
-      const countdownEl = document.getElementById('rot-stat-countdown');
-      if (!countdownEl) return;
+  copyProfileURL(id, scheme) {
+    const p = (this.state.profiles || []).find(x => x.id === id);
+    if (!p) return;
+    const creds = `${encodeURIComponent(p.username)}:${encodeURIComponent(p.password)}`;
+    this.copyToClipboard(`${scheme}://${creds}@${this.serverHost()}:${p.port}`);
+  },
 
-      const rot = this.state.rotationStatus;
-      if (!rot || !rot.enabled) {
-        countdownEl.textContent = 'Paused';
-        return;
-      }
-      if (rot.is_benchmarking) {
-        countdownEl.textContent = 'Testing...';
-        return;
-      }
-      if (rot.mode === 'signal') {
-        countdownEl.textContent = 'Signal Ready';
-        return;
-      }
-      if (rot.next_rotation_at) {
-        const diffMs = new Date(rot.next_rotation_at).getTime() - Date.now();
-        if (diffMs <= 0) {
-          countdownEl.textContent = '00:00';
-          return;
-        }
-        const totalSec = Math.floor(diffMs / 1000);
-        const m = Math.floor(totalSec / 60);
-        const s = totalSec % 60;
-        countdownEl.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-      } else {
-        countdownEl.textContent = '--:--';
-      }
-    }, 1000);
+  editProfile(id) {
+    const p = (this.state.profiles || []).find(x => x.id === id);
+    if (!p) return;
+    document.getElementById('profile-id').value = p.id;
+    document.getElementById('profile-name').value = p.name;
+    document.getElementById('profile-target').value = p.target_url;
+    document.getElementById('profile-port').value = p.port;
+    document.getElementById('profile-username').value = p.username;
+    document.getElementById('profile-password').value = p.password;
+    document.getElementById('profile-enabled').checked = p.enabled;
+    document.getElementById('profile-form-title').textContent = `Edit Profile: ${p.name}`;
+    document.getElementById('profile-name').focus();
+  },
+
+  resetProfileForm() {
+    ['profile-id', 'profile-name', 'profile-target', 'profile-port', 'profile-username', 'profile-password']
+      .forEach(id => { document.getElementById(id).value = ''; });
+    document.getElementById('profile-enabled').checked = true;
+    document.getElementById('profile-form-title').textContent = 'New Profile';
+  },
+
+  async saveProfile() {
+    const body = {
+      id: Number(document.getElementById('profile-id').value) || 0,
+      name: document.getElementById('profile-name').value,
+      target_url: document.getElementById('profile-target').value,
+      port: Number(document.getElementById('profile-port').value),
+      username: document.getElementById('profile-username').value,
+      password: document.getElementById('profile-password').value,
+      enabled: document.getElementById('profile-enabled').checked,
+    };
+    try {
+      await this.api('POST', '/api/profiles', body);
+      this.showToast(body.id ? 'Profile updated' : 'Profile created. Testing nodes for it now...', 'success');
+      this.resetProfileForm();
+      this.loadProfiles();
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  async deleteProfile(id) {
+    const p = (this.state.profiles || []).find(x => x.id === id);
+    if (!confirm(`Delete profile "${p ? p.name : id}"? Its port closes immediately.`)) return;
+    try {
+      await this.api('POST', '/api/profiles/delete', { id });
+      this.loadProfiles();
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  async runOptimizer(kind) {
+    try {
+      await this.api('POST', '/api/optimizer/run', { kind });
+      this.showToast(kind === 'refresh' ? 'Fetching all subscriptions, then re-testing...' : 'Re-testing all profiles...', 'info');
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  async saveSchedule() {
+    const body = {
+      cycle_interval: document.getElementById('opt-cycle-interval').value,
+      refresh_interval: document.getElementById('opt-refresh-interval').value,
+      config_max_age: document.getElementById('opt-max-age').value,
+    };
+    try {
+      this.renderOptimizer(await this.api('POST', '/api/optimizer', body));
+      this.showToast('Schedule saved', 'success');
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  renderOptimizer(st) {
+    if (!st) return;
+    const phaseText = { idle: 'Idle', refreshing: 'Fetching subscriptions', testing: 'Testing nodes' }[st.phase] || st.phase;
+    const pill = document.getElementById('optimizer-status-pill');
+    if (pill) pill.className = `status-pill ${st.phase === 'idle' ? 'idle' : 'active'}`;
+    const set = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+    set('optimizer-status-text', `Optimizer: ${phaseText}`);
+    set('stat-optimizer-phase', phaseText);
+    set('opt-phase', phaseText);
+    set('opt-last-cycle', this.fmtTime(st.last_cycle_at));
+    set('opt-next-cycle', this.fmtTime(st.next_cycle_at));
+    set('opt-last-refresh', this.fmtTime(st.last_refresh_at));
+    set('opt-next-refresh', this.fmtTime(st.next_refresh_at));
+    set('opt-summary', st.last_summary || '—');
+    // Fill the schedule form once, so polling does not overwrite the admin's edits.
+    const form = document.getElementById('opt-cycle-interval');
+    if (form && !form.dataset.loaded) {
+      form.value = st.cycle_interval;
+      document.getElementById('opt-refresh-interval').value = st.refresh_interval;
+      document.getElementById('opt-max-age').value = st.config_max_age;
+      form.dataset.loaded = '1';
+    }
   },
 
   // ==========================================================================

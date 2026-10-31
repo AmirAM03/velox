@@ -108,7 +108,7 @@ func TestServer_SOCKS5_And_HTTP(t *testing.T) {
 	sel := NewSelector(nil, 5, 2, nil)
 	sel.SelectExplicitly(activeCfg)
 
-	srv := NewServer("127.0.0.1", 0, eng, sel, nil)
+	srv := NewServer("127.0.0.1", 0, "", "", eng, sel, nil)
 	if err := srv.Start(); err != nil {
 		t.Fatalf("start proxy server: %v", err)
 	}

@@ -1,137 +1,82 @@
-# Velox on Linux (Ubuntu / Debian) — Deployment Guide
+# Velox on a Linux VPS
 
-This guide walks you through installing, configuring, and running **Velox** on Ubuntu (20.04 LTS, 22.04 LTS, 24.04 LTS) and Debian-based distributions.
+Velox runs as a systemd service on a VPS. Users connect to the VPS on per-service ports; Velox forwards each connection through the best V2Ray node it found for that service.
 
 ---
 
-## 1. Quick Installation (One-Liner)
-
-Install or upgrade to the latest version of Velox:
+## 1. Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AmirAM03/velox/main/install.sh | sudo bash
 ```
 
-This automated installer:
-1. Detects your CPU architecture (`x86_64` / `arm64`).
-2. Downloads the latest release from GitHub.
-3. Installs the executable to `/usr/local/bin/velox`.
-4. Creates the configuration template at `/etc/velox/config.yaml`.
-5. Creates the data directory `/var/lib/velox`.
+The installer:
+- installs `/usr/local/bin/velox`,
+- creates the `velox` system user and `/var/lib/velox` (database),
+- writes `/etc/velox/config.yaml` (kept on upgrades),
+- installs and starts the `velox` systemd service (restarts on failure, starts on boot).
+
+Options (pass after `bash -s --` when piping):
+
+| Option | Meaning |
+| :--- | :--- |
+| `--binary PATH` | Install a binary you built yourself instead of the latest GitHub release. |
+| `--port N` | Dashboard port on `127.0.0.1` (default `18080`). |
+
+Upgrading is the same command; the service restarts on the new binary and keeps its data.
 
 ---
 
----
+## 2. Open the dashboard
 
-## 2. Launching the Web Dashboard
-
-Velox is built as an interactive, web-first application with an embedded zero-dependency Web Dashboard. Simply run:
+The dashboard listens on `127.0.0.1` only and has no login. From your own machine:
 
 ```bash
-velox
+ssh -L 18080:127.0.0.1:18080 user@your-vps
 ```
 
-The dashboard listens on `127.0.0.1:18080` only and has no login, so it is never exposed to the internet.
-
-### Reaching the Dashboard on a VPS
-Open an SSH tunnel from your own machine:
-```bash
-# SSH Tunnel from your local machine:
-ssh -L 18080:127.0.0.1:18080 user@your-vps-ip
-# Then navigate to http://127.0.0.1:18080 in your local browser
-```
-
-The Web Dashboard lets you:
-- **Telemetry Overview**: Real-time proxy status, active node latency, working nodes tally, and database statistics.
-- **Configurations Tab**: Interactive searchable table across all protocols (`VLESS`, `VMess`, `Trojan`, `Shadowsocks`, `Hysteria 2`, `WireGuard`).
-- **Ingest & Parse Tab**: Paste subscription links or raw configuration blocks with instant cryptographic deduplication.
-- **Speed & Latency Benchmark Tab**: Multi-stage speed and delay tests with destination presets (`Google`, `Cloudflare`, `YouTube`, `GitHub`) and configurable parallel threads.
-- **Application Logs Tab**: Persistent SQLite WAL logging (`app_logs`) with keyword search, level/subsystem filtering, JSON attribute inspection, automated retention pruning (24h, 3d, 7d, 30d, 90d, custom), and export.
-- **One-Click Proxy**: Start or stop the in-process proxy engine.
+Then browse to `http://127.0.0.1:18080`.
 
 ---
 
-## 3. CLI Options & Headless Flags
+## 3. Set it up
 
-Velox operates cleanly in user space without requiring any background services:
+1. **Sources** tab: add subscription URLs. Velox fetches them right away and then on the schedule (default every 6 hours), deduplicates every config and drops configs that no subscription has listed for 7 days.
+2. **Profiles** tab: add one profile per target service:
+   - **Target service URL**: what nodes are ranked against, e.g. `https://www.youtube.com/generate_204`.
+   - **Port**: the public port users connect to, e.g. `20001`.
+   - **Username / Password**: required; every profile port is reachable from the internet.
+3. Open each profile port in the firewall:
+   ```bash
+   sudo ufw allow 20001/tcp
+   ```
+4. Copy the profile URL (SOCKS5 or HTTP button) and give it to users, replacing `SERVER_IP` with the VPS address:
+   ```
+   socks5://user:pass@SERVER_IP:20001
+   ```
 
-```bash
-# Run on custom port
-velox --port 8080
-
-# Custom data directory
-velox --data-dir /var/lib/velox
-
-# Enable debug logging
-velox --log-level debug
-```
-
----
-
-## 4. Routing System Traffic Through Velox
-
-### Terminal / Shell Environment
-Add to `~/.bashrc` or run in your active terminal:
-```bash
-export http_proxy="http://127.0.0.1:1080"
-export https_proxy="http://127.0.0.1:1080"
-export all_proxy="socks5://127.0.0.1:1080"
-```
-
-To verify:
-```bash
-curl -i https://ipinfo.io
-```
-
-### Ubuntu Desktop (GNOME)
-Velox includes native GNOME `gsettings` integration when run with `--system`. You can also configure it manually in **Settings → Network → Network Proxy → Manual**:
-- **HTTP Proxy**: `127.0.0.1`, Port `1080`
-- **HTTPS Proxy**: `127.0.0.1`, Port `1080`
-- **Socks Host**: `127.0.0.1`, Port `1080`
-
-### Package Managers (`apt`)
-To route `apt` updates through Velox:
-```bash
-echo 'Acquire::http::Proxy "http://127.0.0.1:1080/";' | sudo tee /etc/apt/apt.conf.d/99proxy
-echo 'Acquire::https::Proxy "http://127.0.0.1:1080/";' | sudo tee -a /etc/apt/apt.conf.d/99proxy
-```
+Every test cycle (default 30 minutes) re-ranks the nodes of each profile. The schedule can be changed in the Profiles tab; **Re-test now** and **Fetch all now** run a cycle immediately.
 
 ---
 
-## 5. Performance Tuning (High-Volume Testing)
-
-For testing thousands of configs concurrently, ensure Ubuntu allows sufficient open files:
+## 4. Operate
 
 ```bash
-# Check current limit
-ulimit -n
-
-# Increase file descriptors temporarily
-ulimit -n 65535
+systemctl status velox          # service state
+journalctl -u velox -f          # live logs
+sudo systemctl restart velox    # restart
 ```
+
+The **Application Logs** tab shows the same logs with search and filters.
+
+Configuration file: `/etc/velox/config.yaml` (see the [Configuration Manual](configuration.md)). Restart the service after editing it.
 
 ---
 
-## 6. Uninstallation & Cleanup
-
-To cleanly remove Velox from your Ubuntu machine:
+## 5. Uninstall
 
 ```bash
-# Standard uninstall (removes binary, systemd service, and /etc/velox)
 curl -fsSL https://raw.githubusercontent.com/AmirAM03/velox/main/uninstall.sh | sudo bash
 ```
 
-To perform a **deep clean** (which also removes user databases and configs in `~/.velox`):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/AmirAM03/velox/main/uninstall.sh | sudo bash -s -- --purge
-```
-
----
-
-## 7. Related Documentation
-
-- [Windows User Guide](windows.md) — Setup and usage on Windows 10/11.
-- [Architecture & Internals](architecture.md) — Technical deep-dive into the pipeline, scoring math, and storage.
-- [Configuration Manual](configuration.md) — Detailed reference for `config.yaml`.
-
+This stops and removes the service, binary, `/etc/velox`, `/var/lib/velox` (including the database) and the `velox` user.

@@ -31,13 +31,11 @@ pipeline:
   per_host_rate_limit: 5
   per_host_cooldown: "500ms"
 
-# Local mixed proxy server settings
+# Profile proxy listeners. Each profile (created in the dashboard) gets its own
+# SOCKS5+HTTP port with a username and password, bound to this address.
 proxy:
-  listen_addr: "127.0.0.1"
-  mixed_port: 1080          # Handles both SOCKS5 and HTTP proxy on single port
-  warm_pool_size: 5         # Number of top configs kept warm for failover
-  health_interval: "30s"    # Health check frequency on active config
-  fail_threshold: 2         # Consecutive failures before auto-failover
+  listen_addr: "0.0.0.0"    # Use a specific IP to bind one interface only
+  fail_threshold: 3         # Consecutive dial failures before failing over to the next-best node
 
 # Test targets for real delay and functional validation
 targets:
