@@ -27,25 +27,12 @@ func Open(dbPath string, logger *slog.Logger) (*Store, error) {
 		logger = slog.Default()
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	// Pragmas go in the DSN so every pooled connection gets them, not just the first one.
+	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)" +
+		"&_pragma=cache_size(-20000)&_pragma=foreign_keys(1)&_pragma=temp_store(MEMORY)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
-	}
-
-	// Configure for performance
-	pragmas := []string{
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA synchronous = NORMAL",
-		"PRAGMA busy_timeout = 5000",
-		"PRAGMA cache_size = -20000", // 20MB cache
-		"PRAGMA foreign_keys = ON",
-		"PRAGMA temp_store = MEMORY",
-	}
-	for _, pragma := range pragmas {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("exec %q: %w", pragma, err)
-		}
 	}
 
 	store := &Store{db: db, logger: logger}
@@ -82,20 +69,8 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_configs_protocol ON configs(protocol)`,
 		`CREATE INDEX IF NOT EXISTS idx_configs_address ON configs(address)`,
 
-		`CREATE TABLE IF NOT EXISTS test_results (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			config_id TEXT NOT NULL REFERENCES configs(id) ON DELETE CASCADE,
-			stage INTEGER NOT NULL,
-			success BOOLEAN NOT NULL,
-			error TEXT,
-			latency_ns INTEGER NOT NULL,
-			ttfb_ns INTEGER,
-			target_url TEXT,
-			tested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`,
-
-		`CREATE INDEX IF NOT EXISTS idx_results_config ON test_results(config_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_results_tested ON test_results(tested_at)`,
+		// test_results was written on every benchmark but never read; drop it so old DBs stop growing.
+		`DROP TABLE IF EXISTS test_results`,
 
 		`CREATE TABLE IF NOT EXISTS scores (
 			config_id TEXT PRIMARY KEY REFERENCES configs(id) ON DELETE CASCADE,
@@ -254,13 +229,13 @@ func (s *Store) UpsertConfigs(configs []*model.ProxyConfig) (inserted, updated i
 	for _, cfg := range configs {
 		data, err := json.Marshal(cfg)
 		if err != nil {
-			continue
+			return 0, 0, fmt.Errorf("marshal config %s: %w", cfg.ID, err)
 		}
 
 		_, err = stmt.Exec(cfg.ID, cfg.Name, cfg.RawURI, string(cfg.Protocol),
 			cfg.Source, cfg.Address, cfg.Port, string(data), formatDBTime(cfg.CreatedAt), formatDBTime(cfg.UpdatedAt))
 		if err != nil {
-			continue
+			return 0, 0, fmt.Errorf("upsert config %s: %w", cfg.ID, err)
 		}
 
 		if existingIDs[cfg.ID] {
@@ -358,44 +333,6 @@ func (s *Store) Deduplicate() (scanned, removed int, err error) {
 	}
 
 	return scanned, removed, nil
-}
-
-// InsertTestResult stores a single test result.
-func (s *Store) InsertTestResult(r *model.TestResult) error {
-	_, err := s.db.Exec(`
-		INSERT INTO test_results (config_id, stage, success, error, latency_ns, ttfb_ns, target_url, tested_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, r.ConfigID, int(r.Stage), r.Success, r.Error,
-		r.Latency.Nanoseconds(), r.TTFB.Nanoseconds(), r.TargetURL, formatDBTime(r.TestedAt))
-	return err
-}
-
-// InsertTestResults stores multiple test results in a batch.
-func (s *Store) InsertTestResults(results []model.TestResult) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.Prepare(`
-		INSERT INTO test_results (config_id, stage, success, error, latency_ns, ttfb_ns, target_url, tested_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return fmt.Errorf("prepare: %w", err)
-	}
-	defer stmt.Close()
-
-	for _, r := range results {
-		_, err := stmt.Exec(r.ConfigID, int(r.Stage), r.Success, r.Error,
-			r.Latency.Nanoseconds(), r.TTFB.Nanoseconds(), r.TargetURL, formatDBTime(r.TestedAt))
-		if err != nil {
-			s.logger.Warn("failed to insert test result", "error", err, "config_id", r.ConfigID)
-		}
-	}
-
-	return tx.Commit()
 }
 
 // UpsertScore inserts or updates a config's score.
@@ -616,16 +553,6 @@ func (s *Store) ConfigCountByProtocol() (map[string]int, error) {
 func (s *Store) DeleteConfig(id string) error {
 	_, err := s.db.Exec("DELETE FROM configs WHERE id = ?", id)
 	return err
-}
-
-// PurgeOldResults removes test results older than the given duration.
-func (s *Store) PurgeOldResults(olderThan time.Duration) (int64, error) {
-	cutoff := time.Now().Add(-olderThan)
-	result, err := s.db.Exec("DELETE FROM test_results WHERE tested_at < ?", formatDBTime(cutoff))
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
 }
 
 // LogRecord represents a persistent application log entry.

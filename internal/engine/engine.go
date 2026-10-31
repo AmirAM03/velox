@@ -5,7 +5,6 @@ package engine
 
 import (
 	"context"
-	"io"
 	"net"
 
 	"github.com/AmirAM03/velox/internal/model"
@@ -26,37 +25,4 @@ type Engine interface {
 
 	// Close releases all resources held by the engine.
 	Close() error
-}
-
-// DialFunc is a function type matching the Engine.Dial signature,
-// useful for creating http.Transport instances.
-type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
-
-// HTTPClient returns a DialFunc bound to a specific config, suitable for
-// use as an http.Transport.DialContext.
-func HTTPDialer(e Engine, config *model.ProxyConfig) DialFunc {
-	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return e.Dial(ctx, config, network, addr)
-	}
-}
-
-// Closer is a helper to close a resource, logging any error.
-type Closer struct {
-	closers []io.Closer
-}
-
-// Add registers a closer.
-func (c *Closer) Add(closer io.Closer) {
-	c.closers = append(c.closers, closer)
-}
-
-// CloseAll closes all registered closers in reverse order.
-func (c *Closer) CloseAll() error {
-	var firstErr error
-	for i := len(c.closers) - 1; i >= 0; i-- {
-		if err := c.closers[i].Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
 }

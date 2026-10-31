@@ -6,9 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
-	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,7 +21,6 @@ import (
 	"github.com/AmirAM03/velox/internal/parser"
 	"github.com/AmirAM03/velox/internal/proxy"
 	"github.com/AmirAM03/velox/internal/storage"
-	"github.com/AmirAM03/velox/internal/system"
 )
 
 // Server manages the web dashboard HTTP server and background proxy state.
@@ -35,12 +33,11 @@ type Server struct {
 	jobMgr      *BenchmarkJobManager
 	rotationMgr *RotationManager
 
-	mu             sync.Mutex
-	proxyEngine    engine.Engine
-	proxyServer    *proxy.Server
-	proxySelector  *proxy.Selector
-	activeConfig   *model.ProxyConfig
-	sysProxyActive bool
+	mu            sync.Mutex
+	proxyEngine   engine.Engine
+	proxyServer   *proxy.Server
+	proxySelector *proxy.Selector
+	activeConfig  *model.ProxyConfig
 }
 
 // NewServer creates a new web dashboard server.
@@ -86,7 +83,7 @@ func NewServer(cfg *config.Config, store *storage.Store, port int, logger *slog.
 }
 
 // Start runs the HTTP server and blocks until ctx is canceled.
-func (s *Server) Start(ctx context.Context, openBrowser bool) error {
+func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 
 	// 1. Static file serving from embedded FS
@@ -120,7 +117,6 @@ func (s *Server) Start(ctx context.Context, openBrowser bool) error {
 	mux.HandleFunc("/api/test/cancel", s.handleTestCancel)
 	mux.HandleFunc("/api/connect", s.handleConnect)
 	mux.HandleFunc("/api/disconnect", s.handleDisconnect)
-	mux.HandleFunc("/api/system-proxy", s.handleSystemProxy)
 	mux.HandleFunc("/api/dedup", s.handleDedup)
 
 	// Application Logs API
@@ -153,11 +149,14 @@ func (s *Server) Start(ctx context.Context, openBrowser bool) error {
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	httpSrv := &http.Server{
 		Addr:    addr,
-		Handler: mux,
+		Handler: localOnly(mux),
 	}
 
 	go func() {
 		<-ctx.Done()
+		if s.rotationMgr != nil {
+			s.rotationMgr.Stop()
+		}
 		s.Close()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -169,30 +168,17 @@ func (s *Server) Start(ctx context.Context, openBrowser bool) error {
 	fmt.Printf("\n⚡ Velox Web Dashboard is running at: %s\n", url)
 	fmt.Println("Press Ctrl+C in this terminal to stop.")
 
-	if openBrowser {
-		go openURL(url)
-	}
-
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("http server: %w", err)
 	}
 	return nil
 }
 
-// Close gracefully stops the proxy and resets system proxy.
+// Close stops the local proxy. Rotation keeps running; it is stopped only on shutdown.
 func (s *Server) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.rotationMgr != nil {
-		s.rotationMgr.Stop()
-	}
-
-	if s.sysProxyActive {
-		sysProxy := system.NewProxyController(s.logger)
-		_ = sysProxy.Disable()
-		s.sysProxyActive = false
-	}
 	if s.proxyServer != nil {
 		s.proxyServer.Stop()
 		s.proxyServer = nil
@@ -214,7 +200,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.activeConfig != nil {
 		active = s.activeConfig
 	}
-	sysProxy := s.sysProxyActive
 	s.mu.Unlock()
 
 	var rotStatus interface{}
@@ -226,7 +211,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"total_configs":        total,
 		"protocol_counts":      protoCounts,
 		"active_config":        active,
-		"system_proxy_enabled": sysProxy,
 		"mixed_port":           s.cfg.Proxy.MixedPort,
 		"db_path":              s.cfg.DBPath(),
 		"rotation":             rotStatus,
@@ -423,7 +407,6 @@ func (s *Server) handleTestStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	ch := s.jobMgr.Subscribe()
 	defer s.jobMgr.Unsubscribe(ch)
@@ -575,53 +558,6 @@ func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
-// API: Toggle System Proxy
-func (s *Server) handleSystemProxy(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	var req struct {
-		Enabled bool `json:"enabled"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request")
-		return
-	}
-
-	port := s.cfg.Proxy.MixedPort
-	if port <= 0 {
-		port = 1080
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	sysProxy := system.NewProxyController(s.logger)
-	if req.Enabled {
-		if err := sysProxy.Enable(s.cfg.Proxy.ListenAddr, port, port); err != nil {
-			s.jobMgr.Log("error", "system", fmt.Sprintf("Failed to enable system proxy: %v", err))
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("set system proxy: %v", err))
-			return
-		}
-		s.sysProxyActive = true
-		s.jobMgr.Log("success", "system", fmt.Sprintf("OS system proxy redirected to %s:%d", s.cfg.Proxy.ListenAddr, port))
-	} else {
-		if err := sysProxy.Disable(); err != nil {
-			s.jobMgr.Log("error", "system", fmt.Sprintf("Failed to disable system proxy: %v", err))
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("clear system proxy: %v", err))
-			return
-		}
-		s.sysProxyActive = false
-		s.jobMgr.Log("info", "system", "OS system proxy cleared and disabled")
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"enabled": s.sysProxyActive,
-	})
-}
-
 // API: Deduplicate
 func (s *Server) handleDedup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -653,20 +589,6 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 
 func writeError(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
-}
-
-func openURL(url string) {
-	time.Sleep(200 * time.Millisecond)
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-	case "darwin":
-		cmd = exec.Command("open", url)
-	default:
-		cmd = exec.Command("xdg-open", url)
-	}
-	cmd.Start()
 }
 
 // API: Get Logs
@@ -918,19 +840,13 @@ func (s *Server) handleRotationTrigger(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	triggerType := r.URL.Query().Get("type")
-	if triggerType == "" {
-		triggerType = "signal"
+	if !s.rotationMgr.GetStatus().Enabled {
+		writeError(w, http.StatusConflict, "auto-rotation is disabled; enable it first")
+		return
 	}
-	s.rotationMgr.TriggerNow(triggerType)
-	s.logger.Info("rotation cycle triggered via signal",
-		slog.String("source", "web"),
-		slog.String("trigger", triggerType),
-	)
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status":  "triggered",
-		"trigger": triggerType,
-	})
+	s.rotationMgr.TriggerNow()
+	s.logger.Info("rotation cycle triggered via signal", slog.String("source", "web"))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "triggered", "trigger": "signal"})
 }
 
 // API: Get Rotation Pool Configs
@@ -1109,3 +1025,24 @@ func (s *Server) handleBenchmarkMethodology(w http.ResponseWriter, r *http.Reque
 	}
 }
 
+
+// localOnly rejects requests that did not come from the dashboard itself.
+// The API has no login (admins reach it through an SSH tunnel), so this blocks
+// other web pages in the admin's browser (CSRF) and DNS-rebinding hosts.
+func localOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		if host != "127.0.0.1" && host != "localhost" && host != "[::1]" && host != "::1" {
+			http.Error(w, "forbidden host", http.StatusForbidden)
+			return
+		}
+		if o := r.Header.Get("Origin"); o != "" && o != "http://"+r.Host {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}

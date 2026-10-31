@@ -24,7 +24,6 @@
 - [🚀 CLI Command Reference](#-cli-command-reference)
 - [🌐 Supported Protocols & Transports](#-supported-protocols--transports)
 - [🎯 Real-World Delay Benchmarking](#-real-world-delay-benchmarking)
-- [🪟 Multi-Platform System Proxy](#-multi-platform-system-proxy)
 - [📚 In-Depth Documentation](#-in-depth-documentation)
 - [🛠️ Building from Source](#️-building-from-source)
 - [🗑️ Uninstallation](#️-uninstallation)
@@ -89,11 +88,11 @@ It automatically starts on `http://127.0.0.1:18080` and opens your default brows
 | **Ingest & Parse** | Dual-input ingestion for subscription URLs and raw configuration paste with cryptographic deduplication. |
 | **Live Benchmarks** | Multi-stage speed & latency tests against destination presets (`Google`, `Cloudflare`, `YouTube`, `GitHub`) with configurable parallel threads and real-time streaming. |
 | **Application Logs** | Persistent in-depth SQLite logs (`app_logs`) with keyword search, level/subsystem filtering, JSON attribute inspection, automated retention pruning, and export. |
-| **Proxy Control** | One-click connect / disconnect for the in-process proxy engine (`127.0.0.1:1080`) and one-click OS system proxy toggle. |
+| **Proxy Control** | One-click connect / disconnect for the in-process proxy engine (`127.0.0.1:1080`) |
 
-To run on a custom port without auto-launching a browser (e.g. for headless VPS):
+The dashboard listens on `127.0.0.1` only and has no login. On a VPS, reach it through an SSH tunnel:
 ```bash
-velox --port 18080 --no-open
+ssh -L 18080:127.0.0.1:18080 user@your-vps   # then open http://127.0.0.1:18080 locally
 ```
 
 ---
@@ -119,9 +118,9 @@ See the [Linux Deployment Guide](docs/ubuntu.md) for distribution setup and envi
 
 1. Download the latest `velox-vX.Y.Z-windows-amd64.zip` from [GitHub Releases](https://github.com/AmirAM03/velox/releases).
 2. Extract `velox.exe` to any folder in your PATH (e.g. `C:\Tools\velox`).
-3. Run `velox.exe` in PowerShell or Command Prompt — the dashboard launches instantly in your browser!
+3. Run `velox.exe` in PowerShell or Command Prompt, then open `http://127.0.0.1:18080`.
 
-See the [Windows User Guide](docs/windows.md) for PowerShell one-liner and system proxy integration.
+See the [Windows User Guide](docs/windows.md) for the PowerShell one-liner.
 
 ---
 
@@ -130,14 +129,11 @@ See the [Windows User Guide](docs/windows.md) for PowerShell one-liner and syste
 Velox operates cleanly in user space without requiring any background daemons or services:
 
 ```bash
-# Launch on default port (18080) and open browser
+# Launch on default port (18080)
 velox
 
 # Specify custom port
 velox --port 8080
-
-# Headless mode (do not automatically open web browser)
-velox --no-open
 
 # Specify custom data directory for SQLite database
 velox --data-dir /path/to/data
@@ -199,28 +195,12 @@ Benchmarking in Velox is fully transparent and user-defined rather than a fixed 
 
 ---
 
-## 🪟 Multi-Platform System Proxy
-
-When invoked with `--system` or when toggling the switch in the Web Dashboard, Velox automatically configures OS-level proxy settings without manual user intervention:
-
-- **Windows**: Updates WinINet registry keys (`HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`). System proxy is automatically restored when Velox disconnects.
-- **Linux (GNOME)**: Configures GNOME desktop settings via `gsettings set org.gnome.system.proxy mode 'manual'`.
-- **Linux (KDE)**: Updates KDE desktop settings via `kwriteconfig6` / `kwriteconfig5`.
-- **Terminal Shells**: Export standard environment variables:
-  ```bash
-  export http_proxy="http://127.0.0.1:1080"
-  export https_proxy="http://127.0.0.1:1080"
-  export all_proxy="socks5://127.0.0.1:1080"
-  ```
-
----
-
 ## 📚 In-Depth Documentation
 
 For advanced deployments, performance tuning, and technical specifications:
 
 - 🐧 [**Linux / Ubuntu Deployment Guide**](docs/ubuntu.md) — One-liner install, APT proxy, and shell integration.
-- 🪟 [**Windows User Guide**](docs/windows.md) — Windows installation, WinINet registry automation, and PowerShell tips.
+- 🪟 [**Windows User Guide**](docs/windows.md) — Windows installation and PowerShell tips.
 - 🔬 [**Architecture & Internals**](docs/architecture.md) — Pipeline mechanics, in-process core, and scoring math.
 - ⚙️ [**Configuration Manual**](docs/configuration.md) — Full `config.yaml` schema, tuning profiles, and overrides.
 
@@ -240,7 +220,7 @@ go build -ldflags "-s -w -X main.version=dev" -o velox ./cmd/velox
 
 ## 🗑️ Uninstallation
 
-To cleanly remove Velox and reset system proxy settings:
+To cleanly remove Velox:
 
 ```bash
 # Standard uninstall

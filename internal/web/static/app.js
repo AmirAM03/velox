@@ -83,11 +83,6 @@ const app = {
       }
     });
 
-    // System Proxy toggle
-    document.getElementById('toggle-sys-proxy')?.addEventListener('change', (e) => {
-      this.toggleSystemProxy(e.target.checked);
-    });
-
     // Protocol filter pills in Configs view
     document.querySelectorAll('#configs-proto-filters .filter-pill').forEach(pill => {
       if (pill.id === 'btn-toggle-working-filter') return;
@@ -436,12 +431,6 @@ const app = {
       }
       if (activePort) activePort.textContent = 'Endpoint: 127.0.0.1:1080 (Idle)';
     }
-
-    // System Proxy Toggle
-    const sysToggle = document.getElementById('toggle-sys-proxy');
-    const sysStatus = document.getElementById('stat-sys-proxy');
-    if (sysToggle) sysToggle.checked = !!data.system_proxy_enabled;
-    if (sysStatus) sysStatus.textContent = data.system_proxy_enabled ? 'Enabled (127.0.0.1:1080)' : 'Disabled';
 
     // Benchmark stats
     const testedElem = document.getElementById('stat-tested-count');
@@ -1127,26 +1116,6 @@ const app = {
     }
   },
 
-  async toggleSystemProxy(enabled) {
-    try {
-      const res = await fetch('/api/system-proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: enabled })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to toggle system proxy');
-
-      this.showToast(enabled ? 'OS System Proxy Enabled' : 'OS System Proxy Disabled', 'success');
-      this.refreshStatus();
-    } catch (e) {
-      this.showToast(e.message, 'error');
-      // Revert checkbox state
-      const checkbox = document.getElementById('toggle-sys-proxy');
-      if (checkbox) checkbox.checked = !enabled;
-    }
-  },
-
   async runDeduplication() {
     const btn = document.getElementById('btn-run-dedup');
     if (btn) btn.disabled = true;
@@ -1606,8 +1575,8 @@ const app = {
 
   async triggerRotationNow() {
     try {
-      const res = await fetch('/api/rotation/trigger?type=signal', { method: 'POST' });
-      if (!res.ok) throw new Error('Trigger failed');
+      const res = await fetch('/api/rotation/trigger', { method: 'POST' });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Trigger failed');
       this.showToast('Rotation signal dispatched! Benchmarking pool via centralized methodology...', 'info');
       this.loadRotationStatus();
     } catch (e) {

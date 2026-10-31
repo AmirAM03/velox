@@ -244,8 +244,6 @@ func TestServer_RotationEndpoints(t *testing.T) {
 	cfgBody, _ := json.Marshal(map[string]any{
 		"enabled":  true,
 		"interval": "5m",
-		"target":   "https://www.google.com/generate_204",
-		"threads":  20,
 	})
 	req = httptest.NewRequest(http.MethodPost, "/api/rotation/config", bytes.NewReader(cfgBody))
 	w = httptest.NewRecorder()
@@ -359,3 +357,92 @@ func TestServer_BenchmarkMethodologyEndpoints(t *testing.T) {
 }
 
 
+
+func TestJobManager_CancelDoesNotDeadlock(t *testing.T) {
+	srv, store, dbHandler := setupTestServer(t)
+	defer store.Close()
+	defer dbHandler.Close()
+
+	// 10.255.255.1 is unroutable, so the TCP step hangs until its timeout and the job is still running when we cancel.
+	cfgs := []*model.ProxyConfig{{ID: "slow", Protocol: model.ProtocolVLESS, Address: "10.255.255.1", Port: 443}}
+	if err := srv.jobMgr.Start("https://example.com", 1, cfgs); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	done := make(chan bool)
+	go func() { done <- srv.jobMgr.Cancel() }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("Cancel returned false for a running job")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Cancel deadlocked")
+	}
+
+	// A new run must be refused until the cancelled one has really stopped.
+	if err := srv.jobMgr.Start("https://example.com", 1, cfgs); err == nil {
+		t.Error("Start succeeded while the cancelled run was still winding down")
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		srv.jobMgr.mu.RLock()
+		st := srv.jobMgr.status
+		srv.jobMgr.mu.RUnlock()
+		if st == StatusCancelled {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status = %s, want cancelled", st)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestLocalOnly(t *testing.T) {
+	h := localOnly(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	cases := []struct {
+		host, origin string
+		want         int
+	}{
+		{"127.0.0.1:18080", "", http.StatusOK},
+		{"localhost:9000", "http://localhost:9000", http.StatusOK}, // SSH tunnel on another local port
+		{"127.0.0.1:18080", "https://evil.example", http.StatusForbidden},
+		{"evil.example:18080", "", http.StatusForbidden}, // DNS rebinding
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/api/connect", nil)
+		req.Host = c.host
+		if c.origin != "" {
+			req.Header.Set("Origin", c.origin)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != c.want {
+			t.Errorf("host=%s origin=%s: got %d, want %d", c.host, c.origin, w.Code, c.want)
+		}
+	}
+}
+
+func TestRotation_SignalModeHasNoTimer(t *testing.T) {
+	srv, store, dbHandler := setupTestServer(t)
+	defer store.Close()
+	defer dbHandler.Close()
+
+	if err := srv.rotationMgr.Configure(true, "signal", "5m"); err != nil {
+		t.Fatal(err)
+	}
+	st := srv.rotationMgr.GetStatus()
+	if st.Mode != "signal" || st.NextRotationAt != nil {
+		t.Errorf("signal mode: mode=%q next=%v, want signal and no timer", st.Mode, st.NextRotationAt)
+	}
+
+	// A bad interval must not half-apply the other settings.
+	if err := srv.rotationMgr.Configure(true, "periodic", "1s"); err == nil {
+		t.Fatal("expected error for 1s interval")
+	}
+	if got := srv.rotationMgr.GetStatus().Mode; got != "signal" {
+		t.Errorf("mode changed to %q despite rejected config", got)
+	}
+}

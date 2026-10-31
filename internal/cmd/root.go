@@ -22,10 +22,7 @@ var (
 
 // NewRootCmd creates the root Cobra command.
 func NewRootCmd() *cobra.Command {
-	var (
-		port   int
-		noOpen bool
-	)
+	var port int
 
 	rootCmd := &cobra.Command{
 		Use:   "velox",
@@ -37,22 +34,17 @@ Running velox launches the local Web Dashboard directly.`,
 		PersistentPreRunE: initConfig,
 		SilenceUsage:      true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runUI(cmd.Context(), port, !noOpen)
+			return runUI(cmd.Context(), port)
 		},
 	}
 
-	// Dashboard flags
-	rootCmd.Flags().IntVarP(&port, "port", "p", 18080, "web dashboard port")
-	rootCmd.Flags().BoolVar(&noOpen, "no-open", false, "do not automatically open the browser")
+	rootCmd.Flags().IntVarP(&port, "port", "p", 18080, "web dashboard port (listens on 127.0.0.1 only)")
 
 	// Persistent flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ~/.velox/config.yaml or /etc/velox/config.yaml)")
 	rootCmd.PersistentFlags().String("log-level", "info", "log level (debug, info, warn, error)")
 	rootCmd.PersistentFlags().Bool("log-json", false, "output logs in JSON format")
 	rootCmd.PersistentFlags().String("data-dir", "", "data directory (default: ~/.velox or /var/lib/velox)")
-
-	// Keep 'ui' / 'dashboard' alias subcommand
-	rootCmd.AddCommand(newUICmd())
 
 	return rootCmd
 }

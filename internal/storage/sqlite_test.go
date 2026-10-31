@@ -81,27 +81,6 @@ func TestStorage_Lifecycle(t *testing.T) {
 		t.Errorf("unexpected protocol counts: %+v", pCounts)
 	}
 
-	// 5. Test results insertion
-	results := []model.TestResult{
-		{
-			ConfigID:  cfg1.ID,
-			Stage:     model.StageDNSTCP,
-			Success:   true,
-			Latency:   30 * time.Millisecond,
-			TestedAt:  time.Now(),
-		},
-		{
-			ConfigID:  cfg1.ID,
-			Stage:     model.StageTLS,
-			Success:   true,
-			Latency:   80 * time.Millisecond,
-			TestedAt:  time.Now(),
-		},
-	}
-	if err := store.InsertTestResults(results); err != nil {
-		t.Fatalf("InsertTestResults: %v", err)
-	}
-
 	// 6. Score upsert and retrieval
 	score := &model.Score{
 		ConfigID:     cfg1.ID,

@@ -57,14 +57,6 @@ func ParseURI(uri string) (*model.ProxyConfig, error) {
 	return config, nil
 }
 
-// ParseMany parses multiple URIs, one per line. It skips empty lines, comments
-// (lines starting with # or //), and logs parse errors without failing.
-// Returns all successfully parsed configs and the count of failures.
-func ParseMany(raw string) (configs []*model.ProxyConfig, failures int) {
-	configs, failures, _ = ParseManyDetailed(raw)
-	return configs, failures
-}
-
 // ParseManyDetailed parses multiple URIs, one per line.
 // It returns:
 // - configs: all unique, successfully parsed ProxyConfigs

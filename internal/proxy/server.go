@@ -107,6 +107,7 @@ func (s *Server) acceptLoop() {
 				return
 			default:
 				s.logger.Debug("accept error", "error", err)
+				time.Sleep(50 * time.Millisecond) // avoid a hot loop on persistent errors such as EMFILE
 				continue
 			}
 		}
@@ -309,6 +310,9 @@ func (s *Server) handleHTTP(clientConn net.Conn, reader *bufio.Reader) {
 		req.Header.Del("Proxy-Connection")
 		req.Header.Del("Proxy-Authenticate")
 		req.Header.Del("Proxy-Authorization")
+		// One request per connection: the raw relay below cannot re-route a reused
+		// keep-alive connection when the browser's next request is for another host.
+		req.Close = true
 
 		if err := req.Write(upstreamConn); err != nil {
 			return

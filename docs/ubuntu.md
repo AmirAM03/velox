@@ -31,17 +31,10 @@ Velox is built as an interactive, web-first application with an embedded zero-de
 velox
 ```
 
-On desktop environments (Ubuntu Desktop with GNOME), this automatically launches the dashboard in your default browser at `http://127.0.0.1:18080`.
+The dashboard listens on `127.0.0.1:18080` only and has no login, so it is never exposed to the internet.
 
-### Headless VPS Mode
-On headless VPS or remote servers without a desktop environment, run Velox with `--no-open`:
-
-```bash
-# Launch without auto-opening a local browser
-velox --port 18080 --no-open
-```
-
-You can then access the dashboard via SSH tunnel or reverse proxy:
+### Reaching the Dashboard on a VPS
+Open an SSH tunnel from your own machine:
 ```bash
 # SSH Tunnel from your local machine:
 ssh -L 18080:127.0.0.1:18080 user@your-vps-ip
@@ -54,7 +47,7 @@ The Web Dashboard lets you:
 - **Ingest & Parse Tab**: Paste subscription links or raw configuration blocks with instant cryptographic deduplication.
 - **Speed & Latency Benchmark Tab**: Multi-stage speed and delay tests with destination presets (`Google`, `Cloudflare`, `YouTube`, `GitHub`) and configurable parallel threads.
 - **Application Logs Tab**: Persistent SQLite WAL logging (`app_logs`) with keyword search, level/subsystem filtering, JSON attribute inspection, automated retention pruning (24h, 3d, 7d, 30d, 90d, custom), and export.
-- **One-Click Proxy & System Toggle**: Start or stop the in-process proxy engine and switch desktop GNOME system proxy settings instantly.
+- **One-Click Proxy**: Start or stop the in-process proxy engine.
 
 ---
 
@@ -65,9 +58,6 @@ Velox operates cleanly in user space without requiring any background services:
 ```bash
 # Run on custom port
 velox --port 8080
-
-# Headless mode
-velox --no-open
 
 # Custom data directory
 velox --data-dir /var/lib/velox

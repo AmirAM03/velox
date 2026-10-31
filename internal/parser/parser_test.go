@@ -160,7 +160,7 @@ invalid://not-a-real-scheme
 # Duplicate of the vless above (same identity fields)
 vless://b831381d-6324-4d53-ad4f-8cda48b30811@2.2.2.2:443?type=tcp&security=none#test2-dup
 `
-	configs, failures := ParseMany(raw)
+	configs, failures, _ := ParseManyDetailed(raw)
 
 	if len(configs) != 2 {
 		t.Errorf("ParseMany() returned %d configs, want 2 (deduped)", len(configs))

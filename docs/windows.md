@@ -42,18 +42,13 @@ Simply double-click `velox.exe` or run it from PowerShell:
 velox.exe
 ```
 
-The dashboard automatically starts on `http://127.0.0.1:18080` and opens your default browser (Chrome, Edge, Firefox, Brave):
+The dashboard starts on `http://127.0.0.1:18080`; open it in your browser:
 - **Overview Tab**: Live telemetry, active proxy status, and top ranked proxy nodes.
 - **Configurations Tab**: Interactive searchable table across all protocols (`VLESS`, `VMess`, `Trojan`, `Shadowsocks`, `Hysteria 2`, `WireGuard`).
 - **Ingest & Parse Tab**: Paste subscription links or raw configuration blocks with instant cryptographic deduplication.
 - **Speed & Latency Benchmark Tab**: Multi-stage speed and delay tests with destination presets (`Google`, `Cloudflare`, `YouTube`, `GitHub`) and configurable parallel threads.
 - **Application Logs Tab**: Persistent SQLite WAL logging (`app_logs`) with keyword search, level/subsystem filtering, JSON attribute inspection, automated retention pruning (24h, 3d, 7d, 30d, 90d, custom), and export.
-- **One-Click Proxy & System Toggle**: Start or stop the in-process proxy engine and switch Windows system proxy settings instantly.
-
-To run on a custom port without auto-opening the browser:
-```powershell
-velox.exe --port 18080 --no-open
-```
+- **One-Click Proxy**: Start or stop the in-process proxy engine.
 
 ---
 
@@ -65,9 +60,6 @@ Velox operates cleanly in foreground user-space:
 # Custom port
 velox.exe --port 8080
 
-# Headless mode (do not automatically open web browser)
-velox.exe --no-open
-
 # Custom database directory
 velox.exe --data-dir "C:\VeloxData"
 
@@ -77,21 +69,7 @@ velox.exe --log-level debug
 
 ---
 
-## 4. Windows System Proxy Integration
-
-When started with `--system` or when toggled in the Web Dashboard, Velox automatically configures the Windows **Internet Settings (WinINet)** registry keys:
-- Registry Path: `HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
-- `ProxyEnable`: Set to `1`
-- `ProxyServer`: Set to `http=127.0.0.1:1080;https=127.0.0.1:1080;socks=127.0.0.1:1080`
-- `ProxyOverride`: Set to `<local>;*.local;127.*;10.*;172.16.*;192.168.*`
-
-All major Windows applications (Microsoft Edge, Google Chrome, Brave, Outlook, Teams, Windows Store) immediately route their traffic through Velox.
-
-When Velox exits (via `Ctrl+C`, the Web Dashboard disconnect button, or process termination), the Windows system proxy is cleanly restored to `0`.
-
----
-
-## 5. Terminal & Development Tool Configuration
+## 4. Terminal & Development Tool Configuration
 
 To route command-line tools in PowerShell through Velox:
 
@@ -123,7 +101,7 @@ pip config set global.proxy http://127.0.0.1:1080
 
 ---
 
-## 6. Data Storage & Profiles
+## 5. Data Storage & Profiles
 
 On Windows, Velox automatically stores its pure-Go SQLite WAL database and configuration files in:
 ```
@@ -133,12 +111,12 @@ On Windows, Velox automatically stores its pure-Go SQLite WAL database and confi
 
 To specify an isolated directory (useful for portable drives or separate profiles):
 ```powershell
-velox --data-dir "D:\VeloxData" ui
+velox --data-dir "D:\VeloxData"
 ```
 
 ---
 
-## 7. Clean Removal
+## 6. Clean Removal
 
 Because Velox runs entirely in user-space without any Windows services or drivers:
 1. Close any running `velox.exe` instances.

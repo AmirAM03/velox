@@ -99,7 +99,7 @@ func NewRotationManager(
 		mode:           "periodic",
 		interval:       15 * time.Minute,
 		intervalStr:    "15m",
-		triggerCh:      make(chan string, 5),
+		triggerCh:      make(chan string, 1), // extra triggers are dropped while one waits
 		history:        make([]RotationHistoryEntry, 0),
 	}
 
@@ -139,7 +139,12 @@ func (m *RotationManager) Start(ctx context.Context) {
 			case <-m.stopCh:
 				return
 			case triggerType := <-m.triggerCh:
-				m.runCycle(triggerType)
+				m.mu.RLock()
+				enabled := m.enabled
+				m.mu.RUnlock()
+				if enabled {
+					m.runCycle(triggerType)
+				}
 			case <-ticker.C:
 				m.mu.Lock()
 				shouldRun := false
@@ -151,7 +156,7 @@ func (m *RotationManager) Start(ctx context.Context) {
 				m.mu.Unlock()
 
 				if shouldRun {
-					m.runCycle("interval")
+					m.runCycle("periodic")
 				}
 			}
 		}
@@ -173,6 +178,14 @@ func (m *RotationManager) Configure(enabled bool, mode string, intervalStr strin
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	var dur time.Duration
+	if intervalStr != "" {
+		var err error
+		if dur, err = parseRotationInterval(intervalStr); err != nil {
+			return err
+		}
+	}
+
 	if mode != "" {
 		if mode != "periodic" && mode != "signal" {
 			mode = "periodic"
@@ -182,10 +195,6 @@ func (m *RotationManager) Configure(enabled bool, mode string, intervalStr strin
 	}
 
 	if intervalStr != "" {
-		dur, err := parseRotationInterval(intervalStr)
-		if err != nil {
-			return err
-		}
 		m.interval = dur
 		m.intervalStr = intervalStr
 		_ = m.store.SetSetting("rotation_interval", m.intervalStr)
@@ -215,23 +224,16 @@ func (m *RotationManager) Configure(enabled bool, mode string, intervalStr strin
 	return nil
 }
 
-// TriggerNow schedules an immediate rotation cycle with the given trigger type (default: "signal").
-func (m *RotationManager) TriggerNow(triggerType ...string) {
-	tt := "signal"
-	if len(triggerType) > 0 && triggerType[0] != "" {
-		tt = triggerType[0]
-	}
+// TriggerNow schedules an immediate signal-triggered rotation cycle (ignored while rotation is disabled).
+func (m *RotationManager) TriggerNow() {
 	select {
-	case m.triggerCh <- tt:
+	case m.triggerCh <- "signal":
 	default:
 	}
 }
 
 // runCycle runs a benchmark across all nodes in the pool using the centralized benchmark methodology and activates the best node.
 func (m *RotationManager) runCycle(triggerType string) {
-	if triggerType == "" {
-		triggerType = "interval"
-	}
 	m.mu.Lock()
 	if m.isBenchmarking {
 		m.mu.Unlock()
@@ -282,30 +284,9 @@ func (m *RotationManager) runCycle(triggerType string) {
 		chain = model.DefaultMethodologyChain()
 	}
 
-	// Determine centralized target URL and expect codes from the chain
-	targetURL := "https://www.google.com/generate_204"
-	var expectCodes []int = []int{200, 204}
-	for _, step := range chain.Steps {
-		if step.Type == model.MethodologyHTTPDelay && strings.TrimSpace(step.TargetURL) != "" {
-			targetURL = strings.TrimSpace(step.TargetURL)
-			if len(step.ExpectCodes) > 0 {
-				expectCodes = step.ExpectCodes
-			}
-			break
-		}
-	}
-
-	// Ensure any HTTP delay step in the chain uses this target
-	for i := range chain.Steps {
-		if chain.Steps[i].Type == model.MethodologyHTTPDelay {
-			chain.Steps[i].TargetURL = targetURL
-		}
-	}
-
-	concurrency := 50
-	if m.pipelineCfg != nil && m.pipelineCfg.Stage2Workers > 0 {
-		concurrency = m.pipelineCfg.Stage2Workers
-	}
+	// Each step keeps its own target URL (the pipeline reads it per step); this is only the fallback.
+	targetURL, expectCodes := rotationTarget(chain)
+	concurrency := m.concurrency()
 
 	m.logger.Info("auto-rotation cycle started: benchmarking pool via centralized methodology",
 		slog.String("source", "system"),
@@ -337,7 +318,6 @@ func (m *RotationManager) runCycle(triggerType string) {
 	var candidates []candidate
 
 	for _, r := range results {
-		_ = m.store.InsertTestResults(r.Results)
 		existing, _ := m.store.GetScore(r.Config.ID)
 		score := sc.Compute(r.Config.ID, r.Results, existing, chain)
 		_ = m.store.UpsertScore(score)
@@ -440,24 +420,16 @@ func (m *RotationManager) GetStatus() RotationStatus {
 
 	// Query centralized benchmark methodology for summary
 	chain, _ := m.store.GetBenchmarkMethodology()
-	targetURL := "https://www.google.com/generate_204"
+	targetURL, _ := rotationTarget(chain)
 	var stepNames []string
 	if chain != nil {
 		for _, s := range chain.ActiveSteps() {
 			stepNames = append(stepNames, s.Name)
-			if s.Type == model.MethodologyHTTPDelay && strings.TrimSpace(s.TargetURL) != "" {
-				targetURL = strings.TrimSpace(s.TargetURL)
-			}
 		}
 	}
 	methodologySummary := "Default Standard (3-Stage)"
 	if len(stepNames) > 0 {
 		methodologySummary = strings.Join(stepNames, " → ")
-	}
-
-	concurrency := 50
-	if m.pipelineCfg != nil && m.pipelineCfg.Stage2Workers > 0 {
-		concurrency = m.pipelineCfg.Stage2Workers
 	}
 
 	status := RotationStatus{
@@ -466,7 +438,7 @@ func (m *RotationManager) GetStatus() RotationStatus {
 		Interval:            m.intervalStr,
 		IntervalSeconds:     int(m.interval.Seconds()),
 		Target:              targetURL,
-		Threads:             concurrency,
+		Threads:             m.concurrency(),
 		MethodologySummary:  methodologySummary,
 		IsBenchmarking:      m.isBenchmarking,
 		ActiveNode:          m.activeNode,
@@ -524,4 +496,25 @@ func parseRotationInterval(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("rotation interval must be at least 30 seconds")
 	}
 	return d, nil
+}
+
+// rotationTarget returns the first enabled HTTP-delay step's target and expected codes.
+func rotationTarget(chain *model.BenchmarkMethodologyChain) (string, []int) {
+	for _, step := range chain.ActiveSteps() { // ActiveSteps handles a nil chain
+		if step.Type == model.MethodologyHTTPDelay && strings.TrimSpace(step.TargetURL) != "" {
+			codes := step.ExpectCodes
+			if len(codes) == 0 {
+				codes = []int{200, 204}
+			}
+			return strings.TrimSpace(step.TargetURL), codes
+		}
+	}
+	return "https://www.google.com/generate_204", []int{200, 204}
+}
+
+func (m *RotationManager) concurrency() int {
+	if m.pipelineCfg != nil && m.pipelineCfg.Stage2Workers > 0 {
+		return m.pipelineCfg.Stage2Workers
+	}
+	return 50
 }

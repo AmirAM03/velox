@@ -236,15 +236,15 @@ func (m *BenchmarkJobManager) Start(target string, threads int, configs []*model
 // Cancel stops the running benchmark.
 func (m *BenchmarkJobManager) Cancel() bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.status != StatusRunning || m.cancelFunc == nil {
+		m.mu.Unlock()
 		return false
 	}
-
+	// Status stays "running" until runPipeline returns, so Start cannot overlap the old run.
 	m.cancelFunc()
-	m.status = StatusCancelled
-	m.currentStage = "Cancelled"
+	m.currentStage = "Cancelling..."
+	m.mu.Unlock()
+
 	m.Log("warn", "test", "Benchmark was cancelled by user")
 
 	m.broadcast(map[string]interface{}{
@@ -372,16 +372,16 @@ func (m *BenchmarkJobManager) runPipeline(ctx context.Context, configs []*model.
 			finalFailed++
 		}
 
-		if err := m.store.InsertTestResults(r.Results); err != nil {
-			m.logger.Warn("failed to store test results", "error", err)
-		}
 		existing, _ := m.store.GetScore(r.Config.ID)
 		score := sc.Compute(r.Config.ID, r.Results, existing, chain)
 		_ = m.store.UpsertScore(score)
 	}
 
 	m.mu.Lock()
-	if m.status != StatusCancelled {
+	if ctx.Err() != nil {
+		m.status = StatusCancelled
+		m.currentStage = "Cancelled"
+	} else {
 		m.status = StatusCompleted
 		m.currentStage = "Benchmark Completed"
 	}

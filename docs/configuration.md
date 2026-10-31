@@ -148,7 +148,7 @@ Any configuration file option can be overridden directly on the command line:
 
 ```bash
 # Override data directory
-velox --data-dir /mnt/storage/velox ui
+velox --data-dir /mnt/storage/velox
 
 # Override log level
 velox --log-level debug test
