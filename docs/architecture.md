@@ -9,7 +9,7 @@ This document details the internal architecture, design principles, and algorith
 Velox was engineered to address the critical bottlenecks present in legacy proxy clients:
 1. **Single Self-Contained Service**: Velox runs as one systemd service on a VPS; the Xray engine, scheduler, proxy listeners and dashboard all live in one process.
 2. **In-Process Core Execution**: By embedding Xray-core directly via Go API (`core.New`, `core.Dial`), Velox eliminates OS process-spawning overhead, inter-process communication (IPC) latency, and socket descriptor exhaustion.
-3. **Multi-Stage Progressive Pipeline**: Testing thousands of proxy configurations is computationally expensive. Velox organizes tests into stages of increasing cost, filtering out dead nodes before invoking resource-heavy TLS and proxy handshakes.
+3. **Cheap Filter, Then the Real Check**: Testing thousands of configurations is expensive, and the real check may use an account. Velox drops dead servers with a TCP connect, keeps only nodes that reach the service with a probe that uses no account, and runs the real check on the fastest few.
 4. **Cryptographic Deduplication**: Subscriptions and public pools often duplicate up to 70% of configurations under different labels. Velox identifies duplicate nodes by cryptographic hash, ensuring a clean SQLite database.
 5. **Zero-CGO Pure-Go Storage**: Embedded SQLite WAL engine (`modernc.org/sqlite`) enables high-concurrency read/write operations without requiring a C compiler or external dynamic libraries.
 
@@ -27,11 +27,11 @@ Velox was engineered to address the critical bottlenecks present in legacy proxy
  │                                                     (stale configs pruned)     │
  │        │  every cycle (default 30m)                                            │
  │        ▼                                                                       │
- │  Optimizer                                                                     │
- │   1. TCP + TLS steps once over all configs  (throwaway test engine)            │
- │   2. fastest 500 survivors                                                     │
- │   3. HTTP step once per profile, against that profile's target URL             │
- │   4. top 10 per profile ──► profile_nodes table + live selector                │
+ │  Optimizer (throwaway test engine, per profile)                                │
+ │   1. TCP connect to every config (shared by the profiles in a run)             │
+ │   2. filter: the profile type's probe through each node (no account)           │
+ │   3. check: type's real check once per node; label it; passing = candidates    │
+ │   4. best so far goes live at once; final top 10 ──► profile_nodes             │
  │        │                                                                       │
  │        ▼                                                                       │
  │  Profile listeners (one per profile, 0.0.0.0:port, SOCKS5 + HTTP, user/pass)   │
@@ -45,28 +45,41 @@ Velox was engineered to address the critical bottlenecks present in legacy proxy
 
 ---
 
-## 3. Multi-Stage Pipeline Mechanics
+## 3. Per-Profile Benchmark
 
-When benchmarking thousands of configurations, a naive test (establishing an end-to-end proxy connection for all nodes) would cause massive thread exhaustion and take minutes. Velox filters nodes through three progressive stages:
+Profiles are **built-in profile types**, one profile per type, created at startup. A type is code (`internal/checks`): it knows how to test a node for its service, and which settings it needs, such as a login session. Profiles cannot be added from the dashboard and there are no free-form target URLs; you edit a profile's port, user, password, Auto re-test and its type's settings (secret settings are never sent back to the browser). An enabled profile needs settings its type accepts.
 
-### Stage 0: DNS Resolution & TCP Reachability
-- **Concurrency**: Up to `2,000` concurrent goroutines.
-- **Timeout**: `1,500 ms`.
-- **Purpose**: Strips out offline servers, expired domains, and dead IP addresses in milliseconds.
-- **Metric**: TCP handshake latency.
+| Type | Checks | Needs |
+|---|---|---|
+| **Antigravity** | Asks Google, with your agy (Antigravity CLI) session, through each node: which country Google places the node in, and whether that country may use the Antigravity API. Google uses its own geo-IP data, which often differs from public IP-location sites, so this is the only reliable test. | **Sign in with Google** (or paste agy's token file) and agy's OAuth client secret (`GOCSPX-…`, embedded in the agy binary). |
 
-### Stage 1: TLS & REALITY Handshake Validation
-- **Concurrency**: Up to `500` concurrent goroutines.
-- **Timeout**: `2,500 ms`.
-- **Purpose**: Validates TLS certificates, ALPN negotiation, and cryptographic configuration validity for TLS and REALITY nodes. Non-TLS nodes skip directly to Stage 2.
-- **Metric**: TLS handshake latency.
+**Signing in (Antigravity)**: in the Profiles tab, **Edit** the profile, paste agy's client secret and press **Sign in with Google**. The browser goes to Google's sign-in page and comes back to the dashboard (through your SSH tunnel, whatever local port it uses); Velox then stores a refresh token for that account and shows "Signed in as …". This is the standard desktop OAuth flow (loopback redirect + PKCE) with agy's public desktop client and the scopes agy's own token carries, so agy itself is not needed. The code exchange goes direct from the server, or through the profile's nodes if the server cannot reach Google. **Sign out** forgets the stored session (it does not revoke it at Google; do that in your Google account's third-party access page). Pasting an agy token file still works as an alternative.
 
-### Stage 2: Functional In-Process Proxy Test (Real Delay)
-- **Concurrency**: Up to `150` concurrent goroutines.
-- **Timeout**: `5,000 ms`.
-- **Purpose**: Establishes an in-process proxy tunnel through `core.Dial` and sends an HTTP GET request to real-world target URLs (e.g. `https://www.google.com/generate_204` or `https://cp.cloudflare.com/generate_204`).
-- **Metric**: **Time to First Byte (TTFB)** — measures the true network round-trip latency through the proxy node.
-- **Status Evaluation**: Accepts standard `204 No Content`, `200 OK`, as well as standard HTTP `3xx` redirects (such as Google or Cloudflare's `301/302`), confirming end-to-end data delivery.
+**Where the credentials come from** (none are stored in this repo; read them on the machine that has agy installed, and treat them like passwords):
+
+- **OAuth client ID** (public, not a secret): `1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com` — the same id agy records as `AGY_CLIENT_ID`. It lives in the code (`internal/checks/antigravity.go`).
+- **Client secret** (`GOCSPX-…`): embedded in the agy binary (`%LOCALAPPDATA%\agy\bin\agy.exe` on Windows, the installed `agy` binary elsewhere). The binary embeds **three** `GOCSPX-` strings; exactly one pairs with the client id above, the other two return `401 invalid_client`. Each is `GOCSPX-` followed by **exactly 28** characters — pin that length when you grep, because the surrounding bytes are also `[A-Za-z0-9_-]` and a greedy match over-reads and fails. Identify the right one by sending a `grant_type=refresh_token` request (below) with each: the one that returns `200` is it.
+- **Refresh token** (the actual account credential): in agy's token file `~/.gemini/antigravity-cli/antigravity-oauth-token`, field `token.refresh_token`. Anyone holding it plus the public client id/secret can act as that Google account.
+- **Access token** (short-lived, ~1 h): never stored on disk. Velox derives it on demand from the client secret + refresh token against `https://oauth2.googleapis.com/token` and keeps it in memory only, refreshing through a node about once an hour.
+
+So a full setup needs two values pasted into the profile: the **client secret** and, as the session, either a **Sign in with Google** or the pasted token file. Velox stores both in `velox.db` and never shows them again.
+
+To pull both out of an installed, signed-in agy automatically (and optionally load them straight into a running Velox), use `tools/agy-extract/` — it encodes the `GOCSPX-`+28 length rule and the "which secret pairs with the client id" test described above. See its README.
+
+One flow runs every type. It runs on the schedule (profiles with **Auto** on), after new configs arrive, and whenever **Test now** is pressed:
+
+1. **Reachability** (shared by all profiles in a run): a TCP connect to every stored config, 512 at a time, 2 s each.
+2. **Filter**: the type's cheap probe through each reachable node, 128 at a time, 6 s each, at most 4 minutes. A probe never uses an account. Antigravity: any answer from Google's API over a verified TLS connection.
+3. **Check**: the type's real check, **once per node**, fastest probe first, 6 nodes at a time. Each checked config is **labeled** and, if it passes, becomes a **candidate**; the response time of the check is recorded. Antigravity: with your Google session, Google's eligibility answer (`aicode fetchConfig`): 200 = eligible, labeled with the country Google places the node in (`fetchUserInfo`); 403 `LOCATION_NOT_ELIGIBLE` = rejected, labeled with Google's detected country. The OAuth access token is refreshed through a node about once an hour and kept in memory only. A run stops after 30 candidates or 150 checked nodes (or 6 minutes).
+4. **Rank and serve**: candidates are ranked by the response time recorded in step 3. Every new candidate that beats the others serves the port at once, with the previous candidates behind it as fallbacks; after the run the best 10 serve. All checked configs, labeled, are saved and listed on the card under **Checked configs** (candidates, or everything with the reason a config was rejected); each row shows the country Google detected, whether it is eligible, and the raw JSON response Google returned.
+
+If nothing passes, or the session is refused, the profile keeps its previous nodes and the Profiles tab shows why, e.g. `rejected HK 20, IR 3` or `session error: …`.
+
+The limits are constants in `internal/bench/bench.go`.
+
+**Account note**: the real check sends your session through up to 150 different IPs per run. The caps keep this bounded, but Google may still treat it as unusual account activity; a separate Google account is the safer choice.
+
+**Adding a service** = one new `checks.Kind` (fields + a `bench.Check` with `Probe` and `Round`) in `internal/checks`, added to `checks.Kinds`.
 
 ---
 
@@ -103,60 +116,10 @@ Velox eliminates duplicate proxy nodes across subscription feeds using SHA-256 c
 
 ---
 
-## 6. Dynamic Benchmark Methodology & Execution Chaining
-
-Velox provides fully customizable, user-defined testing methodology chains rather than a hardcoded black-box flow:
-
-1. **Configurable Test Stages**:
-   - `tcp_ping`: High-concurrency TCP socket dial to proxy host and port.
-   - `tls_handshake`: Full cryptographic handshake with server certificate and SNI validation (including Xray-core REALITY negotiation).
-   - `http_delay`: In-process proxy HTTP GET measuring real Time to First Byte (TTFB) against specified URLs (e.g. Google 204, Cloudflare trace, YouTube).
-
-2. **Sequential Chaining & Early Disqualification ("Necessary" Filter)**:
-   - Each test step in the chain specifies priority/execution order, custom timeout, weight, and a **Necessary (Hard Filter)** attribute.
-   - If a step with `Necessary: true` fails on a proxy node, that node is **immediately disqualified**: subsequent expensive stages are skipped, reducing system I/O, and the node's composite score is marked as Failed (`Composite = 999999`, `SuccessScore = 1.0`).
-   - If a step is optional (`Necessary: false`), surviving nodes proceed to subsequent stages even if that particular test failed.
-
-3. **Scoring Modes**:
-   - `primary_test` (Default): When chained (e.g. Ping + Delay toward URL), passing necessary tests guarantees eligibility, and the latency score is derived directly from the primary test (e.g. HTTP delay). When only a single test is configured, its latency drives the score directly.
-   - `weighted_average`: Blends passing latencies across all active stages proportional to each step's assigned weight.
-
----
-
-## 7. Smart Composite Scoring Formula
-
-Nodes that pass all testing stages are evaluated using a multi-factor weighted scoring algorithm where **lower scores represent faster, more reliable proxies**:
-
-$$\text{Composite} = W_{\text{lat}} \cdot S_{\text{lat}} + W_{\text{succ}} \cdot S_{\text{succ}} + W_{\text{stab}} \cdot S_{\text{stab}} + W_{\text{rec}} \cdot S_{\text{rec}}$$
-
-### Weights (Default Configuration)
-- $W_{\text{lat}} = 0.30$ (P95 Latency)
-- $W_{\text{succ}} = 0.30$ (Success Rate)
-- $W_{\text{stab}} = 0.15$ (Stability Penalty)
-- $W_{\text{rec}} = 0.10$ (Recency Bonus)
-- $W_{\text{tp}} = 0.15$ (Throughput Capacity)
-
-### Component Definitions
-1. **Latency Score ($S_{\text{lat}}$)**:
-   Calculates the 95th percentile (P95) latency across recent test samples:
-   $$S_{\text{lat}} = \min\left(\frac{\text{Latency}_{\text{P95}}\text{ in ms}}{10000}, 1.0\right)$$
-2. **Success Score ($S_{\text{succ}}$)**:
-   $$S_{\text{succ}} = 1.0 - \frac{\text{Successful Tests}}{\text{Total Tests}}$$
-3. **Stability Penalty ($S_{\text{stab}}$)**:
-   Measures state flips (success-to-failure or failure-to-success transitions) to penalize jittery or unstable nodes:
-   $$S_{\text{stab}} = \text{PreviousPenalty} \cdot \alpha + \text{TransitionRate} \cdot (1 - \alpha)$$
-4. **Recency Factor ($S_{\text{rec}}$)**:
-   Penalizes scores as tests grow stale over a 7-day decay horizon:
-   $$S_{\text{rec}} = \min\left(\frac{\text{Hours Since Last Test}}{168}, 1.0\right)$$
-
----
-
-## 7. Storage Engine (SQLite WAL)
+## 6. Storage Engine (SQLite WAL)
 
 Velox uses embedded SQLite compiled purely in Go via `modernc.org/sqlite`:
 - **WAL Mode (Write-Ahead Logging)**: Enabled via `PRAGMA journal_mode=WAL;` to allow simultaneous non-blocking concurrent readers during active background writes.
 - **Synchronous Normal**: `PRAGMA synchronous=NORMAL;` maximizes disk I/O throughput while guaranteeing database integrity.
-- **Covering Indexes**:
-  - `idx_configs_protocol`: Accelerates protocol filtering (`VLESS`, `VMess`, `Trojan`, `SS`).
-  - `idx_scores_composite`: Enables instant sub-millisecond retrieval of top-ranked proxies.
-  - `idx_test_results_config`: Fast aggregation for scoring pipelines.
+- **Indexes**: `idx_configs_protocol` (protocol filter) and `idx_configs_address`.
+- **Tables**: `configs` (deduplicated nodes), `sources`, `profiles`, `profile_nodes` (each profile's saved ranking), `settings`, `app_logs`.

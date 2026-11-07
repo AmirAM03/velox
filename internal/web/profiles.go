@@ -5,19 +5,25 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/AmirAM03/velox/internal/checks"
 	"github.com/AmirAM03/velox/internal/engine"
 	"github.com/AmirAM03/velox/internal/model"
 	"github.com/AmirAM03/velox/internal/proxy"
 	"github.com/AmirAM03/velox/internal/storage"
 )
 
-// ProfileStatus is a profile plus its live listener state, as shown in the dashboard.
+// ProfileStatus is a profile plus its type and live listener state, as shown in the
+// dashboard. Secret settings are left out; SecretsSet names the ones that are saved.
 type ProfileStatus struct {
 	storage.Profile
+	Type       checks.Kind           `json:"type"`
+	SecretsSet []string              `json:"secrets_set"`
+	Account    string                `json:"account,omitempty"` // who the profile is signed in as
 	Running    bool                  `json:"running"`
 	Error      string                `json:"error,omitempty"`
 	ActiveNode *model.ProxyConfig    `json:"active_node,omitempty"`
-	Nodes      []storage.ProfileNode `json:"nodes"`
+	Nodes      []storage.ProfileNode `json:"nodes"` // the candidates of the last test, best first
+	Stats      *ProfileStats         `json:"stats,omitempty"`
 }
 
 type profileRuntime struct {
@@ -75,7 +81,7 @@ func (m *ProfileManager) Sync() error {
 	for id, rt := range m.running {
 		p, ok := wanted[id]
 		if ok && p.Port == rt.profile.Port && p.Username == rt.profile.Username && p.Password == rt.profile.Password {
-			rt.profile = p // name/target changes need no restart
+			rt.profile = p // name/settings changes need no restart
 			continue
 		}
 		rt.server.Stop()
@@ -88,9 +94,9 @@ func (m *ProfileManager) Sync() error {
 		if _, ok := m.running[id]; ok {
 			continue
 		}
-		sel := proxy.NewSelector(nil, 0, m.failLimit, m.logger)
-		if _, cfgs, err := m.store.ListProfileNodes(id); err == nil {
-			sel.SetPool(cfgs) // serve last cycle's nodes right away after a restart
+		sel := proxy.NewSelector(m.failLimit, m.logger)
+		if _, cfgs, err := m.store.ListProfileNodes(id, true); err == nil {
+			sel.SetPool(cfgs[:min(len(cfgs), nodesPerProfile)]) // serve the last test's best candidates right away after a restart
 		}
 		srv := proxy.NewServer(m.listenAddr, p.Port, p.Username, p.Password, m.engine, sel, m.logger)
 		if err := srv.Start(); err != nil {
@@ -113,6 +119,43 @@ func (m *ProfileManager) SetNodes(profileID int64, cfgs []*model.ProxyConfig) {
 	}
 }
 
+// SetActive switches a running profile's active node to one of its candidates.
+// A candidate outside the served pool (ranked past the top) is pulled in and put
+// first, so any candidate on the card can be chosen. The choice holds until the
+// next test re-ranks the pool.
+func (m *ProfileManager) SetActive(profileID int64, configID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rt := m.running[profileID]
+	if rt == nil {
+		return fmt.Errorf("profile is not running")
+	}
+	if rt.selector.SetActive(configID) {
+		return nil
+	}
+	nodes, cfgs, err := m.store.ListProfileNodes(profileID, true)
+	if err != nil {
+		return err
+	}
+	for i, n := range nodes {
+		if n.ConfigID == configID {
+			rt.selector.SetPool(append([]*model.ProxyConfig{cfgs[i]}, rt.selector.Pool()...))
+			return nil
+		}
+	}
+	return fmt.Errorf("not a current candidate for this profile")
+}
+
+// Nodes returns the profile's current ranked nodes (empty when it has none or is not running).
+func (m *ProfileManager) Nodes(profileID int64) []*model.ProxyConfig {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rt := m.running[profileID]; rt != nil {
+		return rt.selector.Pool()
+	}
+	return nil
+}
+
 // ReleaseUnused closes Xray instances no profile uses any more. Nodes from the
 // previous call are kept one extra cycle so open user connections are not cut
 // the moment a node drops out of the ranking.
@@ -121,7 +164,7 @@ func (m *ProfileManager) ReleaseUnused() {
 	defer m.mu.Unlock()
 	keep := map[string]bool{}
 	for _, rt := range m.running {
-		for _, c := range rt.selector.WarmPool() {
+		for _, c := range rt.selector.Pool() {
 			keep[c.ID] = true
 		}
 	}
@@ -144,10 +187,22 @@ func (m *ProfileManager) Status() ([]ProfileStatus, error) {
 	}
 	out := make([]ProfileStatus, 0, len(profiles))
 	for _, p := range profiles {
-		st := ProfileStatus{Profile: p, Nodes: []storage.ProfileNode{}}
-		if nodes, _, err := m.store.ListProfileNodes(p.ID); err == nil && nodes != nil {
+		st := ProfileStatus{Profile: p, Nodes: []storage.ProfileNode{}, SecretsSet: []string{}}
+		st.Type, _ = checks.Get(p.Kind)
+		st.Account = p.Settings[checks.AccountKey]
+		st.Settings = map[string]string{}
+		for _, f := range st.Type.Fields {
+			switch {
+			case !f.Secret:
+				st.Settings[f.Key] = p.Settings[f.Key]
+			case p.Settings[f.Key] != "":
+				st.SecretsSet = append(st.SecretsSet, f.Key)
+			}
+		}
+		if nodes, _, err := m.store.ListProfileNodes(p.ID, true); err == nil && nodes != nil {
 			st.Nodes = nodes
 		}
+		st.Stats = LoadProfileStats(m.store, p.ID)
 		m.mu.Lock()
 		if rt := m.running[p.ID]; rt != nil {
 			st.Running = true

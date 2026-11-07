@@ -1,192 +1,102 @@
-// Package proxy implements the local mixed SOCKS5+HTTP proxy server,
-// config selection, and automatic health-checking failover.
+// Package proxy implements the per-profile SOCKS5+HTTP proxy server and the
+// selection of the node it forwards through.
 package proxy
 
 import (
-	"fmt"
 	"log/slog"
 	"sync"
 
 	"github.com/AmirAM03/velox/internal/model"
-	"github.com/AmirAM03/velox/internal/storage"
 )
 
-// Selector manages the active proxy config and the warm pool of top configs.
+// Selector holds a profile's ranked nodes (best first) and the one in use.
 type Selector struct {
-	mu           sync.RWMutex
-	store        *storage.Store
-	warmPoolSize int
-	active       *model.ProxyConfig
-	warmPool     []*model.ProxyConfig
-	failCount    int
-	failLimit    int
-	logger       *slog.Logger
-	onSwitch     func(oldCfg, newCfg *model.ProxyConfig)
+	mu        sync.RWMutex
+	active    *model.ProxyConfig
+	pool      []*model.ProxyConfig
+	failCount int
+	failLimit int
+	logger    *slog.Logger
 }
 
-// NewSelector creates a new config Selector.
-func NewSelector(store *storage.Store, warmPoolSize, failLimit int, logger *slog.Logger) *Selector {
+// NewSelector creates an empty Selector that fails over after failLimit consecutive failures.
+func NewSelector(failLimit int, logger *slog.Logger) *Selector {
 	if logger == nil {
 		logger = slog.Default()
-	}
-	if warmPoolSize <= 0 {
-		warmPoolSize = 5
 	}
 	if failLimit <= 0 {
 		failLimit = 2
 	}
-
-	return &Selector{
-		store:        store,
-		warmPoolSize: warmPoolSize,
-		failLimit:    failLimit,
-		logger:       logger,
-	}
+	return &Selector{failLimit: failLimit, logger: logger}
 }
 
-// RefreshWarmPool reloads the top configs from the database into the warm pool.
-func (s *Selector) RefreshWarmPool() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	configs, err := s.store.ListConfigs(s.warmPoolSize)
-	if err != nil {
-		return fmt.Errorf("list top configs: %w", err)
-	}
-
-	if len(configs) == 0 {
-		return fmt.Errorf("no configs available in database")
-	}
-
-	s.warmPool = configs
-
-	// If no active config is selected, choose the top config
-	if s.active == nil && len(configs) > 0 {
-		s.active = configs[0]
-		s.failCount = 0
-		s.logger.Info("selected initial active config",
-			"id", s.active.ID,
-			"name", s.active.DisplayName(),
-			"protocol", s.active.Protocol,
-		)
-	}
-
-	return nil
-}
-
-// Active returns the current active proxy config.
+// Active returns the node in use, or nil when the profile has none.
 func (s *Selector) Active() *model.ProxyConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.active
 }
 
-// SelectExplicitly sets the active config by ID or explicit config.
-func (s *Selector) SelectExplicitly(cfg *model.ProxyConfig) {
+// Pool returns a copy of the ranked nodes, best first.
+func (s *Selector) Pool() []*model.ProxyConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]*model.ProxyConfig(nil), s.pool...)
+}
+
+// SetPool replaces the ranked nodes (best first) and makes the best one active.
+func (s *Selector) SetPool(configs []*model.ProxyConfig) {
 	s.mu.Lock()
-	old := s.active
-	s.active = cfg
+	defer s.mu.Unlock()
+	s.pool = configs
 	s.failCount = 0
-	cb := s.onSwitch
-	s.mu.Unlock()
-
-	s.logger.Info("manually switched active config",
-		"name", cfg.DisplayName(),
-		"protocol", cfg.Protocol,
-	)
-
-	if cb != nil {
-		cb(old, cfg)
+	s.active = nil
+	if len(configs) > 0 {
+		s.active = configs[0]
 	}
 }
 
-// RecordSuccess resets the consecutive failure counter for the active config.
+// SetActive makes the pool node with id the active one and resets the failure
+// counter. It reports whether id was in the pool.
+func (s *Selector) SetActive(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.pool {
+		if c.ID == id {
+			s.active = c
+			s.failCount = 0
+			return true
+		}
+	}
+	return false
+}
+
+// RecordSuccess resets the consecutive failure counter.
 func (s *Selector) RecordSuccess() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failCount = 0
 }
 
-// RecordFailure increments the failure count and triggers failover if limit is reached.
-// Returns true if a failover occurred.
+// RecordFailure counts a failure of the active node and, at the limit, moves to
+// the next node in rank order (wrapping around). It reports whether it switched.
 func (s *Selector) RecordFailure(reason string) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.failCount++
-	currentFailures := s.failCount
-	activeName := ""
-	if s.active != nil {
-		activeName = s.active.DisplayName()
-	}
-	s.logger.Warn("active config health check failure",
-		"config", activeName,
-		"failures", currentFailures,
-		"threshold", s.failLimit,
-		"reason", reason,
-	)
-
-	if currentFailures < s.failLimit {
-		s.mu.Unlock()
+	if s.failCount < s.failLimit || len(s.pool) < 2 {
 		return false
 	}
-
-	// Trigger failover to next best in warm pool
-	old := s.active
-	var next *model.ProxyConfig
-	for _, c := range s.warmPool {
-		if old == nil || c.ID != old.ID {
-			next = c
+	next := s.pool[0]
+	for i, c := range s.pool {
+		if s.active != nil && c.ID == s.active.ID {
+			next = s.pool[(i+1)%len(s.pool)]
 			break
 		}
 	}
-
-	if next == nil {
-		s.logger.Error("failover failed: no alternate config available in warm pool")
-		s.mu.Unlock()
-		return false
-	}
-
+	s.logger.Warn("node failing, switching to the next-ranked one", "source", "proxy",
+		"from", s.active.DisplayName(), "to", next.DisplayName(), "failures", s.failCount, "reason", reason)
 	s.active = next
 	s.failCount = 0
-	cb := s.onSwitch
-	s.mu.Unlock()
-
-	s.logger.Warn("⚡ AUTOMATIC FAILOVER TRIGGERED",
-		"from", old.DisplayName(),
-		"to", next.DisplayName(),
-		"consecutive_failures", currentFailures,
-	)
-
-	if cb != nil {
-		cb(old, next)
-	}
 	return true
-}
-
-// SetOnSwitchCallback sets a callback to be called whenever active config changes.
-func (s *Selector) SetOnSwitchCallback(cb func(oldCfg, newCfg *model.ProxyConfig)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onSwitch = cb
-}
-
-// WarmPool returns a copy of current warm pool configs.
-func (s *Selector) WarmPool() []*model.ProxyConfig {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]*model.ProxyConfig, len(s.warmPool))
-	copy(out, s.warmPool)
-	return out
-}
-
-// SetPool replaces the warm pool with a ranked list (best first) and makes the best one active.
-func (s *Selector) SetPool(configs []*model.ProxyConfig) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.warmPool = configs
-	s.failCount = 0
-	if len(configs) > 0 {
-		s.active = configs[0]
-	} else {
-		s.active = nil
-	}
 }

@@ -2,21 +2,23 @@ package web
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/AmirAM03/velox/internal/bench"
 	"github.com/AmirAM03/velox/internal/config"
 	loggerPkg "github.com/AmirAM03/velox/internal/logger"
 	"github.com/AmirAM03/velox/internal/model"
-	"github.com/AmirAM03/velox/internal/pipeline"
 	"github.com/AmirAM03/velox/internal/storage"
 )
 
@@ -161,39 +163,18 @@ func TestServer_ConfigsFilteringAndSorting(t *testing.T) {
 		_ = store.UpsertConfig(c)
 	}
 
-	// Insert scores: node-a (working, lat 45), node-b (failed, composite 999999), node-c (working, lat 15)
-	_ = store.UpsertScore(&model.Score{ConfigID: "node-a", Composite: 50, LatencyScore: 45, SuccessScore: 0.0})
-	_ = store.UpsertScore(&model.Score{ConfigID: "node-b", Composite: 999999, LatencyScore: 0, SuccessScore: 1.0})
-	_ = store.UpsertScore(&model.Score{ConfigID: "node-c", Composite: 20, LatencyScore: 15, SuccessScore: 0.0})
-
-	// 1. Test working_only=true
-	req := httptest.NewRequest(http.MethodGet, "/api/configs?working_only=true", nil)
-	w := httptest.NewRecorder()
-	srv.handleConfigs(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("handleConfigs status = %d", w.Code)
-	}
-
 	var res struct {
 		Configs []storage.ConfigItem `json:"configs"`
 		Total   int                  `json:"total"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
-		t.Fatalf("Unmarshal configs response: %v", err)
-	}
-	if res.Total != 2 || len(res.Configs) != 2 {
-		t.Fatalf("expected 2 working configs, got total=%d, len=%d", res.Total, len(res.Configs))
-	}
-
-	// 2. Test working_only=true & sort_by=latency (Gamma 15ms should be first)
-	req = httptest.NewRequest(http.MethodGet, "/api/configs?working_only=true&sort_by=latency", nil)
-	w = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/configs?sort_by=name&search=a+Node", nil)
+	w := httptest.NewRecorder()
 	srv.handleConfigs(w, req)
-	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
-		t.Fatalf("Unmarshal configs response: %v", err)
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("handleConfigs = %d %s", w.Code, w.Body)
 	}
-	if len(res.Configs) < 2 || res.Configs[0].ID != "node-c" || res.Configs[1].ID != "node-a" {
-		t.Errorf("expected node-c first (15ms), got %+v", res.Configs)
+	if res.Total != 3 || res.Configs[0].ID != "node-a" || res.Configs[2].ID != "node-c" {
+		t.Errorf("name sort = %+v, want Alpha, Beta, Gamma", res.Configs)
 	}
 
 	// 3. Test protocol filter
@@ -205,113 +186,6 @@ func TestServer_ConfigsFilteringAndSorting(t *testing.T) {
 	}
 	if res.Total != 1 || res.Configs[0].ID != "node-c" {
 		t.Errorf("expected 1 trojan config, got %+v", res)
-	}
-}
-
-func TestServer_BenchmarkMethodologyEndpoints(t *testing.T) {
-	srv, store, dbHandler := setupTestServer(t)
-	defer store.Close()
-	defer dbHandler.Close()
-
-	// 1. Initial GET should return default chain
-	req := httptest.NewRequest(http.MethodGet, "/api/benchmark/methodology", nil)
-	w := httptest.NewRecorder()
-	srv.handleBenchmarkMethodology(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("GET /api/benchmark/methodology status = %d", w.Code)
-	}
-
-	var getResp struct {
-		Success bool                             `json:"success"`
-		Chain   model.BenchmarkMethodologyChain `json:"chain"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &getResp); err != nil {
-		t.Fatalf("unmarshal GET response: %v", err)
-	}
-	if !getResp.Success || len(getResp.Chain.Steps) == 0 {
-		t.Errorf("expected successful GET with default steps, got %+v", getResp)
-	}
-
-	// 2. POST updated chain
-	newChain := model.BenchmarkMethodologyChain{
-		ScoringMode: model.ScoringModeWeighted,
-		Steps: []model.TestStepConfig{
-			{
-				ID:        "step-url-only",
-				Type:      model.MethodologyHTTPDelay,
-				Name:      "Direct Google Ping",
-				Enabled:   true,
-				Necessary: true,
-				Priority:  1,
-				Weight:    1.0,
-				IsPrimary: true,
-				TimeoutMS: 3000,
-				TargetURL: "https://www.google.com/generate_204",
-			},
-		},
-	}
-	body, _ := json.Marshal(newChain)
-	req = httptest.NewRequest(http.MethodPost, "/api/benchmark/methodology", bytes.NewReader(body))
-	w = httptest.NewRecorder()
-	srv.handleBenchmarkMethodology(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("POST /api/benchmark/methodology status = %d, body = %s", w.Code, w.Body.String())
-	}
-
-	// 3. Verify changes persisted
-	req = httptest.NewRequest(http.MethodGet, "/api/benchmark/methodology", nil)
-	w = httptest.NewRecorder()
-	srv.handleBenchmarkMethodology(w, req)
-	_ = json.Unmarshal(w.Body.Bytes(), &getResp)
-	if getResp.Chain.ScoringMode != model.ScoringModeWeighted {
-		t.Errorf("expected ScoringMode %s, got %s", model.ScoringModeWeighted, getResp.Chain.ScoringMode)
-	}
-	if len(getResp.Chain.Steps) != 1 || getResp.Chain.Steps[0].ID != "step-url-only" {
-		t.Errorf("expected 1 step with id step-url-only, got %+v", getResp.Chain.Steps)
-	}
-}
-
-
-
-func TestJobManager_CancelDoesNotDeadlock(t *testing.T) {
-	srv, store, dbHandler := setupTestServer(t)
-	defer store.Close()
-	defer dbHandler.Close()
-
-	// 10.255.255.1 is unroutable, so the TCP step hangs until its timeout and the job is still running when we cancel.
-	cfgs := []*model.ProxyConfig{{ID: "slow", Protocol: model.ProtocolVLESS, Address: "10.255.255.1", Port: 443}}
-	if err := srv.jobMgr.Start("https://example.com", 1, cfgs); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	done := make(chan bool)
-	go func() { done <- srv.jobMgr.Cancel() }()
-	select {
-	case ok := <-done:
-		if !ok {
-			t.Fatal("Cancel returned false for a running job")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Cancel deadlocked")
-	}
-
-	// A new run must be refused until the cancelled one has really stopped.
-	if err := srv.jobMgr.Start("https://example.com", 1, cfgs); err == nil {
-		t.Error("Start succeeded while the cancelled run was still winding down")
-	}
-
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		srv.jobMgr.mu.RLock()
-		st := srv.jobMgr.status
-		srv.jobMgr.mu.RUnlock()
-		if st == StatusCancelled {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("status = %s, want cancelled", st)
-		}
-		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -364,25 +238,64 @@ func TestServer_ProfileAndSourceAPI(t *testing.T) {
 		t.Errorf("duplicate source: got %d, want 409", w.Code)
 	}
 
-	// Profiles: credentials are mandatory because the port is public.
-	noAuth := storage.Profile{Name: "yt", TargetURL: "youtube.com", Port: 0, Enabled: true}
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	noAuth.Port = ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
-	if w := post(srv.handleProfiles, noAuth); w.Code != http.StatusBadRequest {
-		t.Errorf("profile without credentials: got %d, want 400", w.Code)
+	// Paste: plain lists and base64 bodies import; duplicates collapse; garbage is rejected.
+	ss := "ss://YWVzLTEyOC1nY206cHc@1.2.3.4:8388#a"
+	if w := post(srv.handleSourcePaste, map[string]string{"content": ss + "\n" + ss + "#dup\nnot-a-config"}); w.Code != http.StatusOK ||
+		!strings.Contains(w.Body.String(), `"configs":1`) || !strings.Contains(w.Body.String(), `"new":1`) {
+		t.Errorf("paste list: %d %s, want 1 config, 1 new", w.Code, w.Body)
 	}
-	good := noAuth
-	good.Username, good.Password = "u", "p"
-	if w := post(srv.handleProfiles, good); w.Code != http.StatusOK {
-		t.Fatalf("create profile: %d %s", w.Code, w.Body)
+	b64 := base64.StdEncoding.EncodeToString([]byte(ss + "\ntrojan://pw@5.6.7.8:443#b"))
+	if w := post(srv.handleSourcePaste, map[string]string{"content": b64}); w.Code != http.StatusOK ||
+		!strings.Contains(w.Body.String(), `"configs":2`) || !strings.Contains(w.Body.String(), `"new":1`) {
+		t.Errorf("paste base64: %d %s, want 2 configs, 1 new", w.Code, w.Body)
+	}
+	if w := post(srv.handleSourcePaste, map[string]string{"content": "hello"}); w.Code != http.StatusBadRequest {
+		t.Errorf("paste garbage: got %d, want 400", w.Code)
+	}
+
+	// Profiles: the built-in types exist from the start, disabled; they can only be edited.
+	if err := srv.seedProfiles(); err != nil {
+		t.Fatal(err)
 	}
 	st, _ := srv.profiles.Status()
-	if len(st) != 1 || !st[0].Running || st[0].TargetURL != "https://youtube.com" {
-		t.Fatalf("profile status = %+v, want one running profile with normalized target", st)
+	if len(st) != 1 || st[0].Kind != "antigravity" || st[0].Enabled || len(st[0].Type.Fields) == 0 {
+		t.Fatalf("seeded profiles = %+v, want one disabled Antigravity profile", st)
 	}
+	id := st[0].ID
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	edit := map[string]any{"id": id, "port": port, "enabled": true, "auto_test": false}
+	if w := post(srv.handleProfiles, edit); w.Code != http.StatusBadRequest {
+		t.Errorf("profile without credentials: got %d, want 400", w.Code)
+	}
+	edit["username"], edit["password"] = "u", "p"
+	if w := post(srv.handleProfiles, edit); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "settings") {
+		t.Errorf("enabled profile without session: got %d %s, want 400 about settings", w.Code, w.Body)
+	}
+	edit["settings"] = map[string]string{"refresh_token": `{"token":{"refresh_token":"1//secret-rt"}}`, "client_secret": "GOCSPX-secret"}
+	if w := post(srv.handleProfiles, edit); w.Code != http.StatusOK {
+		t.Fatalf("save profile: %d %s", w.Code, w.Body)
+	}
+	// Secrets never go back to the dashboard, and saving with them empty keeps them.
+	edit["settings"] = map[string]string{}
+	if w := post(srv.handleProfiles, edit); w.Code != http.StatusOK {
+		t.Fatalf("save profile again: %d %s", w.Code, w.Body)
+	}
+	w := httptest.NewRecorder()
+	srv.handleProfiles(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	if strings.Contains(w.Body.String(), "1//secret-rt") || strings.Contains(w.Body.String(), "GOCSPX-secret") || !strings.Contains(w.Body.String(), `"secrets_set":["client_secret","refresh_token"]`) {
+		t.Errorf("profiles API leaks or lost secrets: %s", w.Body)
+	}
+	if ps, _ := store.ListProfiles(); ps[0].Settings["client_secret"] != "GOCSPX-secret" {
+		t.Errorf("stored settings = %v, want secrets kept", ps[0].Settings)
+	}
+	if w := post(srv.handleProfiles, map[string]any{"id": 999, "port": port + 1, "username": "u", "password": "p"}); w.Code != http.StatusNotFound {
+		t.Errorf("unknown profile: got %d, want 404 (profiles cannot be added)", w.Code)
+	}
+
 	// The listener must demand auth.
-	c, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", good.Port))
+	c, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatalf("profile port not listening: %v", err)
 	}
@@ -394,33 +307,34 @@ func TestServer_ProfileAndSourceAPI(t *testing.T) {
 		t.Errorf("no-auth SOCKS5 to profile port: got method %#x, want 0xFF", reply[1])
 	}
 
-	if w := post(srv.handleProfileDelete, map[string]int64{"id": st[0].ID}); w.Code != http.StatusOK {
-		t.Fatalf("delete profile: %d", w.Code)
+	edit["enabled"] = false
+	if w := post(srv.handleProfiles, edit); w.Code != http.StatusOK {
+		t.Fatalf("disable profile: %d", w.Code)
 	}
-	if _, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", good.Port), time.Second); err == nil {
-		t.Error("listener still open after profile delete")
+	if _, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second); err == nil {
+		t.Error("listener still open after the profile was disabled")
 	}
 }
 
-func TestOptimizer_SplitAndRank(t *testing.T) {
-	base, httpStep := splitChain(model.DefaultMethodologyChain())
-	if len(base) != 2 || httpStep.Type != model.MethodologyHTTPDelay {
-		t.Fatalf("split: base=%d http=%s", len(base), httpStep.Type)
+// While a profile is being checked, candidates found so far lead (best first)
+// and the previous nodes follow as fallbacks, without duplicates, capped.
+func TestLivePool(t *testing.T) {
+	c := func(id string) *model.ProxyConfig { return &model.ProxyConfig{ID: id} }
+	done := []bench.Result{{Config: c("new-best")}, {Config: c("old-2")}}
+	pool := livePool(done, []*model.ProxyConfig{c("old-1"), c("old-2"), c("old-3")})
+	var ids []string
+	for _, p := range pool {
+		ids = append(ids, p.ID)
 	}
-	for _, s := range base {
-		if !s.Necessary {
-			t.Errorf("base step %s must be a hard filter", s.ID)
-		}
+	if got := strings.Join(ids, ","); got != "new-best,old-2,old-1,old-3" {
+		t.Errorf("live pool = %s", got)
 	}
 
-	mk := func(id string, ok bool, ms int) pipeline.Result {
-		return pipeline.Result{
-			Config:  &model.ProxyConfig{ID: id},
-			Results: []model.TestResult{{Success: ok, Latency: time.Duration(ms) * time.Millisecond}},
-		}
+	var many []*model.ProxyConfig
+	for i := 0; i < 2*nodesPerProfile; i++ {
+		many = append(many, c(fmt.Sprint(i)))
 	}
-	nodes, cfgs := rankProfileNodes([]pipeline.Result{mk("slow", true, 300), mk("dead", false, 10), mk("fast", true, 50)})
-	if len(nodes) != 2 || cfgs[0].ID != "fast" || nodes[0].Rank != 1 || nodes[1].ConfigID != "slow" {
-		t.Errorf("rank = %+v", nodes)
+	if n := len(livePool(nil, many)); n != nodesPerProfile {
+		t.Errorf("pool size %d, want cap %d", n, nodesPerProfile)
 	}
 }

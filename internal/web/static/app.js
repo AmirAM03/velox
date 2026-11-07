@@ -11,19 +11,9 @@ const app = {
     configsLimit: 50,
     configsProto: '',
     configsSearch: '',
-    configsWorkingOnly: false,
-    configsSortBy: 'score',
+    configsSortBy: 'updated',
     profiles: [],
     eventSource: null,
-    benchmarkRunning: false,
-    benchmarkTotal: 0,
-    benchmarkTested: 0,
-    benchmarkPassed: 0,
-    benchmarkFailed: 0,
-    benchmarkFastest: 0,
-    logs: [],
-    activeLogLevel: 'all',
-    autoScrollLogs: true,
 
     // Application Logs & Telemetry
     appLogs: [],
@@ -40,10 +30,9 @@ const app = {
   init() {
     this.bindEvents();
     this.setupEventSource();
+    this.showLoginResult();
     this.refreshStatus();
-    this.loadTopNodes();
     this.loadLogStats();
-    this.loadMethodology();
     
     // Poll status periodically every 3 seconds
     setInterval(() => {
@@ -64,31 +53,18 @@ const app = {
     // Refresh all
     document.getElementById('btn-refresh-all')?.addEventListener('click', () => {
       this.refreshStatus();
-      this.loadTopNodes();
       this.showToast('Data refreshed', 'info');
     });
 
     // Protocol filter pills in Configs view
     document.querySelectorAll('#configs-proto-filters .filter-pill').forEach(pill => {
-      if (pill.id === 'btn-toggle-working-filter') return;
       pill.addEventListener('click', () => {
-        document.querySelectorAll('#configs-proto-filters .filter-pill').forEach(p => {
-          if (p.id !== 'btn-toggle-working-filter') p.classList.remove('active');
-        });
+        document.querySelectorAll('#configs-proto-filters .filter-pill').forEach(p => p.classList.remove('active'));
         pill.classList.add('active');
         this.state.configsProto = pill.dataset.proto;
         this.state.configsPage = 0;
         this.loadConfigs();
       });
-    });
-
-    // Working Only filter pill toggle
-    const workingPill = document.getElementById('btn-toggle-working-filter');
-    workingPill?.addEventListener('click', () => {
-      this.state.configsWorkingOnly = !this.state.configsWorkingOnly;
-      workingPill.classList.toggle('active', this.state.configsWorkingOnly);
-      this.state.configsPage = 0;
-      this.loadConfigs();
     });
 
     // Sort By dropdown
@@ -121,91 +97,20 @@ const app = {
       this.loadConfigs();
     });
 
-    // Benchmark Target Presets
-    document.querySelectorAll('.preset-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        const input = document.getElementById('benchmark-target-input');
-        if (input) {
-          input.value = btn.dataset.url;
-          this.syncTargetURLToMethodology(btn.dataset.url);
-        }
-      });
-    });
-
-    // Benchmark Target Input Manual Input
-    document.getElementById('benchmark-target-input')?.addEventListener('input', (e) => {
-      const url = e.target.value.trim();
-      document.querySelectorAll('.preset-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.url === url);
-      });
-      this.syncTargetURLToMethodology(url);
-    });
-
-    // Benchmark Parallel Threads Chips
-    document.querySelectorAll('.thread-chips-group .chip-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.thread-chips-group .chip-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        const threadsInput = document.getElementById('benchmark-threads-input');
-        if (threadsInput) {
-          threadsInput.value = btn.dataset.threads;
-        }
-        const label = document.getElementById('threads-indicator-label');
-        if (label) label.textContent = `${btn.dataset.threads} Threads`;
-      });
-    });
-
-    // Benchmark Threads Numeric Input
-    document.getElementById('benchmark-threads-input')?.addEventListener('input', (e) => {
-      const val = parseInt(e.target.value, 10) || 100;
-      const label = document.getElementById('threads-indicator-label');
-      if (label) label.textContent = `${val} Threads`;
-      document.querySelectorAll('.thread-chips-group .chip-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.threads === String(val));
-      });
-    });
-
-    // Start Benchmark
-    document.getElementById('btn-start-benchmark')?.addEventListener('click', () => {
-      this.startBenchmark();
-    });
-
-    // Cancel Benchmark
-    document.getElementById('btn-cancel-benchmark')?.addEventListener('click', () => {
-      this.cancelBenchmark();
-    });
-
-    // Live Console Filters & Controls
-    document.getElementById('btn-clear-console')?.addEventListener('click', () => {
-      this.clearLogs();
-    });
-    document.getElementById('console-autoscroll')?.addEventListener('change', (e) => {
-      this.state.autoScrollLogs = e.target.checked;
-    });
-    document.querySelectorAll('.console-filter-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.console-filter-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        this.state.activeLogLevel = btn.dataset.level;
-        this.renderLogs();
-      });
-    });
-
     // Sources
     document.getElementById('btn-add-source')?.addEventListener('click', () => this.addSource());
+    document.getElementById('btn-paste-source')?.addEventListener('click', () => this.pasteSource());
     document.getElementById('btn-run-refresh')?.addEventListener('click', () => this.runOptimizer('refresh'));
 
-    // Profiles & optimizer schedule
-    document.getElementById('btn-save-profile')?.addEventListener('click', () => this.saveProfile());
-    document.getElementById('btn-reset-profile')?.addEventListener('click', () => this.resetProfileForm());
-    document.getElementById('btn-gen-password')?.addEventListener('click', () => {
-      const bytes = crypto.getRandomValues(new Uint8Array(12));
-      document.getElementById('profile-password').value = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-    });
-    document.getElementById('btn-run-cycle')?.addEventListener('click', () => this.runOptimizer('cycle'));
+    // General Options (subscriptions) schedule
     document.getElementById('btn-save-schedule')?.addEventListener('click', () => this.saveSchedule());
+
+    // General Options modal: open from the Profiles button or the always-on status pill; close on ×, Close, or backdrop click.
+    const optDialog = document.getElementById('optimizer-dialog');
+    document.getElementById('btn-optimizer')?.addEventListener('click', () => optDialog?.showModal());
+    document.getElementById('optimizer-status-pill')?.addEventListener('click', () => optDialog?.showModal());
+    optDialog?.querySelectorAll('.js-opt-close').forEach(b => b.addEventListener('click', () => optDialog.close()));
+    optDialog?.addEventListener('click', (e) => { if (e.target === optDialog) optDialog.close(); });
 
     // Row actions: rows carry data-action + data-id, never untrusted data inside inline JS.
     document.addEventListener('click', (e) => {
@@ -213,23 +118,46 @@ const app = {
       if (!el || el.tagName === 'INPUT') return;
       const id = el.dataset.id;
       switch (el.dataset.action) {
-        case 'profile-edit': this.editProfile(Number(id)); break;
-        case 'profile-delete': this.deleteProfile(Number(id)); break;
+        case 'profile-settings': this.toggleSettings(Number(id)); break;
+        case 'profile-save': this.saveProfile(Number(id)); break;
+        case 'profile-genpw': {
+          const pw = this.cardPanel(Number(id), '.pc-settings').querySelector('[data-field="password"]');
+          pw.value = Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, '0')).join('');
+          break;
+        }
+        case 'profile-results': this.toggleResults(Number(id)); break;
+        case 'profile-results-refresh': this.toggleResults(Number(id), true); break;
+        case 'profile-results-filter':
+          this.cardPanel(Number(id), '.pc-results').dataset.all = el.dataset.all;
+          this.renderResults(Number(id));
+          break;
         case 'profile-copy': this.copyProfileURL(Number(id), el.dataset.scheme); break;
+        case 'profile-set-active': this.setActiveNode(Number(id), el.dataset.config); break;
+        case 'profile-toggle': this.toggleProfileCard(Number(id)); break;
+        case 'profile-test': this.testProfile(Number(id)); break;
+        case 'profile-login': this.loginProfile(Number(id)); break;
+        case 'profile-logout': this.logoutProfile(Number(id)); break;
         case 'source-delete': this.deleteSource(Number(id)); break;
         case 'config-copy': this.copyURI((this.state.configs[Number(id)] || {}).raw_uri); break;
         case 'log-copy': this.copyLogJSON(Number(id)); break;
+      }
+    });
+    // Profile cards open from the keyboard too (Enter or Space on the focused card).
+    document.addEventListener('keydown', (e) => {
+      if ((e.key === 'Enter' || e.key === ' ') && e.target.dataset && e.target.dataset.action === 'profile-toggle') {
+        e.preventDefault();
+        this.toggleProfileCard(Number(e.target.dataset.id));
       }
     });
     document.addEventListener('change', (e) => {
       if (e.target.dataset.action === 'source-toggle') {
         this.toggleSource(Number(e.target.dataset.id), e.target.checked);
       }
-    });
-
-    // Deduplication tool
-    document.getElementById('btn-run-dedup')?.addEventListener('click', () => {
-      this.runDeduplication();
+      // Enable the interval only when auto-test is turned on, in the same settings panel.
+      if (e.target.dataset.field === 'auto_test') {
+        const sel = e.target.closest('.pc-settings')?.querySelector('[data-field="test_interval"]');
+        if (sel) sel.disabled = !e.target.checked;
+      }
     });
 
     // Application Logs & Telemetry Events
@@ -329,8 +257,6 @@ const app = {
     } else if (tabId === 'logs') {
       this.loadLogs();
       this.loadLogStats();
-    } else if (tabId === 'benchmark') {
-      this.loadMethodology();
     }
   },
 
@@ -358,23 +284,8 @@ const app = {
     if (profElem) profElem.textContent = `${running} / ${profiles.length} running`;
     const srcElem = document.getElementById('stat-sources');
     if (srcElem) srcElem.textContent = `${(data.sources || []).length} sources`;
+    this.state.progress = (data.optimizer && data.optimizer.progress) || {};
     this.renderOptimizer(data.optimizer);
-    const listenElem = document.getElementById('listen-addr-display');
-    if (listenElem) listenElem.textContent = data.listen_addr || '—';
-
-    // Benchmark stats
-    const testedElem = document.getElementById('stat-tested-count');
-    const avgLatencyElem = document.getElementById('stat-avg-latency');
-    if (testedElem) testedElem.textContent = `${data.tested_configs || 0} Tested`;
-    if (avgLatencyElem && data.avg_latency_ms) {
-      avgLatencyElem.textContent = `Avg: ${Math.round(data.avg_latency_ms)} ms`;
-    }
-
-    // DB Path
-    const dbPathElem = document.getElementById('db-path-display');
-    if (dbPathElem && data.db_path) {
-      dbPathElem.textContent = data.db_path;
-    }
 
     // Protocols Breakdown
     this.renderProtocolDistribution(data.protocol_counts || {}, data.total_configs || 0);
@@ -423,41 +334,6 @@ const app = {
     }
   },
 
-  async loadTopNodes() {
-    try {
-      const res = await fetch('/api/configs?limit=5');
-      if (!res.ok) return;
-      const data = await res.json();
-      const configs = data.configs || [];
-      const tbody = document.getElementById('top-nodes-tbody');
-      if (!tbody) return;
-
-      if (!configs || configs.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" class="text-muted text-center py-4">No configurations yet. Add a subscription in the Sources tab.</td></tr>`;
-        return;
-      }
-
-      tbody.innerHTML = configs.map((cfg, idx) => {
-        const scoreStr = (cfg.score !== undefined && cfg.score !== null) ? cfg.score.toFixed(3) : '—';
-        const latStr = (cfg.latency_ms !== undefined && cfg.latency_ms !== null) ? `${Math.round(cfg.latency_ms)} ms` : '—';
-        const proto = this.escapeHtml(cfg.protocol);
-
-        return `
-          <tr>
-            <td class="text-muted font-bold">${idx + 1}</td>
-            <td><span class="badge badge-${proto}">${proto}</span></td>
-            <td class="font-medium">${this.escapeHtml(cfg.name || `${cfg.address}:${cfg.port}`)}</td>
-            <td class="text-mono text-sm">${this.escapeHtml(cfg.address)}:${Number(cfg.port)}</td>
-            <td><span class="text-mono">${scoreStr}</span></td>
-            <td><span class="text-mono ${cfg.latency_ms ? 'text-success' : ''}">${latStr}</span></td>
-          </tr>
-        `;
-      }).join('');
-    } catch (e) {
-      console.error('Failed to load top nodes', e);
-    }
-  },
-
   async loadConfigs() {
     try {
       const offset = this.state.configsPage * this.state.configsLimit;
@@ -466,7 +342,6 @@ const app = {
       url.searchParams.set('offset', offset);
       if (this.state.configsProto) url.searchParams.set('protocol', this.state.configsProto);
       if (this.state.configsSearch) url.searchParams.set('search', this.state.configsSearch);
-      if (this.state.configsWorkingOnly) url.searchParams.set('working_only', 'true');
       if (this.state.configsSortBy) url.searchParams.set('sort_by', this.state.configsSortBy);
 
       const res = await fetch(url);
@@ -480,13 +355,10 @@ const app = {
       if (!tbody) return;
 
       if (configs.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" class="text-muted text-center py-4">No configs match your filter.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="7" class="text-muted text-center py-4">No configs match your filter.</td></tr>`;
       } else {
         tbody.innerHTML = configs.map((cfg, idx) => {
           const rank = offset + idx + 1;
-          const scoreStr = (cfg.score !== undefined && cfg.score !== null) ? cfg.score.toFixed(3) : '—';
-          const latStr = (cfg.latency_ms !== undefined && cfg.latency_ms !== null) ? `${Math.round(cfg.latency_ms)} ms` : '—';
-          const latColor = cfg.latency_ms ? (cfg.latency_ms < 300 ? 'text-success' : 'text-amber') : 'text-muted';
           const proto = this.escapeHtml(cfg.protocol);
           const transportInfo = this.escapeHtml(`${cfg.network || 'tcp'} / ${cfg.security || 'none'}`);
 
@@ -497,8 +369,7 @@ const app = {
               <td class="font-medium">${this.escapeHtml(cfg.name || 'Unnamed Node')}</td>
               <td class="text-mono text-sm">${this.escapeHtml(cfg.address)}:${Number(cfg.port)}</td>
               <td class="text-xs text-muted">${transportInfo}</td>
-              <td><span class="text-mono ${latColor}">${latStr}</span></td>
-              <td><span class="text-mono">${scoreStr}</span></td>
+              <td class="text-xs text-muted" title="${this.escapeHtml(cfg.source)}">${this.fmtTime(cfg.updated_at)}</td>
               <td>
                 <button class="btn btn-secondary btn-sm" data-action="config-copy" data-id="${idx}" title="Copy URI">📋 Copy</button>
               </td>
@@ -530,25 +401,8 @@ const app = {
       this.state.eventSource.close();
     }
 
-    const es = new EventSource('/api/test/stream');
+    const es = new EventSource('/api/events');
     this.state.eventSource = es;
-
-    const statusIndicator = document.getElementById('console-stream-status');
-
-    es.onopen = () => {
-      if (statusIndicator) {
-        statusIndicator.textContent = '● Live SSE Connected';
-        statusIndicator.className = 'text-xs text-emerald';
-      }
-    };
-
-    es.onerror = () => {
-      if (statusIndicator) {
-        statusIndicator.textContent = '○ Reconnecting SSE...';
-        statusIndicator.className = 'text-xs text-muted';
-      }
-    };
-
     es.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data);
@@ -561,397 +415,14 @@ const app = {
 
   handleStreamMessage(msg) {
     switch (msg.type) {
-      case 'snapshot':
-        this.handleSnapshot(msg);
-        break;
-      case 'start':
-        this.handleBenchmarkStart(msg);
-        break;
-      case 'node_result':
-        this.handleNodeResult(msg);
-        break;
-      case 'log':
-        if (msg.entry) {
-          this.appendLog(msg.entry);
-        }
-        break;
       case 'app_log':
-        if (msg.log) {
-          this.handleLiveAppLog(msg.log);
-        }
-        break;
-      case 'cancelled':
-        this.handleBenchmarkCancelled(msg);
-        break;
-      case 'complete':
-        this.handleBenchmarkComplete(msg);
+        if (msg.log) this.handleLiveAppLog(msg.log);
         break;
       case 'optimizer_status':
+        this.state.progress = msg.status.progress || {};
         this.renderOptimizer(msg.status);
         if (this.state.activeTab === 'profiles') this.loadProfiles();
         break;
-    }
-  },
-
-  handleSnapshot(msg) {
-    if (msg.logs && msg.logs.length > 0) {
-      this.state.logs = msg.logs;
-      this.renderLogs();
-    }
-
-    this.state.benchmarkTotal = msg.total || 0;
-    this.state.benchmarkTested = msg.tested || 0;
-    this.state.benchmarkPassed = msg.passed || 0;
-    this.state.benchmarkFailed = msg.failed || 0;
-    this.state.benchmarkFastest = msg.fastest_ms || 0;
-
-    const totalEl = document.getElementById('stat-live-total');
-    const testedEl = document.getElementById('stat-live-tested');
-    const passedEl = document.getElementById('stat-live-passed');
-    const failedEl = document.getElementById('stat-live-failed');
-    const fastestEl = document.getElementById('stat-live-fastest');
-    const stageLabel = document.getElementById('benchmark-stage-label');
-    const statusBadge = document.getElementById('benchmark-status-badge');
-    const headerStatus = document.getElementById('benchmark-header-text');
-    const headerPill = document.getElementById('benchmark-header-status');
-    const startBtn = document.getElementById('btn-start-benchmark');
-    const cancelBtn = document.getElementById('btn-cancel-benchmark');
-
-    if (totalEl) totalEl.textContent = this.state.benchmarkTotal;
-    if (testedEl) testedEl.textContent = this.state.benchmarkTested;
-    if (passedEl) passedEl.textContent = this.state.benchmarkPassed;
-    if (failedEl) failedEl.textContent = this.state.benchmarkFailed;
-    if (fastestEl) fastestEl.textContent = this.state.benchmarkFastest > 0 ? `${Math.round(this.state.benchmarkFastest)} ms` : '— ms';
-
-    if (msg.total > 0) {
-      const pct = Math.min(100, Math.round((this.state.benchmarkTested / msg.total) * 100));
-      const bar = document.getElementById('benchmark-progress-bar');
-      const pctEl = document.getElementById('benchmark-progress-pct');
-      const countsEl = document.getElementById('benchmark-progress-counts');
-      if (bar) bar.style.width = `${pct}%`;
-      if (pctEl) pctEl.textContent = `${pct}%`;
-      if (countsEl) countsEl.textContent = `${this.state.benchmarkTested} / ${msg.total} nodes`;
-    }
-
-    if (msg.status === 'running') {
-      this.state.benchmarkRunning = true;
-      if (startBtn) { startBtn.classList.add('hidden'); startBtn.disabled = true; }
-      if (cancelBtn) cancelBtn.classList.remove('hidden');
-      if (statusBadge) { statusBadge.textContent = 'Running'; statusBadge.className = 'badge badge-primary'; }
-      if (headerStatus) headerStatus.textContent = 'Testing Live';
-      if (headerPill) headerPill.className = 'status-pill active';
-      if (stageLabel) stageLabel.textContent = msg.current_stage || 'Testing...';
-    } else {
-      this.state.benchmarkRunning = false;
-      if (startBtn) { startBtn.classList.remove('hidden'); startBtn.disabled = false; }
-      if (cancelBtn) cancelBtn.classList.add('hidden');
-      if (statusBadge) {
-        statusBadge.textContent = msg.status === 'completed' ? 'Completed' : (msg.status === 'cancelled' ? 'Cancelled' : 'Idle');
-        statusBadge.className = msg.status === 'completed' ? 'badge badge-success' : 'badge';
-      }
-      if (headerStatus) headerStatus.textContent = msg.status === 'completed' ? 'Completed' : 'Ready';
-      if (headerPill) headerPill.className = 'status-pill idle';
-      if (stageLabel) stageLabel.textContent = msg.current_stage || 'Ready to test';
-    }
-
-    if (msg.results && msg.results.length > 0) {
-      const tbody = document.getElementById('benchmark-live-tbody');
-      if (tbody) {
-        tbody.innerHTML = msg.results.slice(0, 100).map(d => this.createNodeRowHtml(d)).join('');
-      }
-    }
-  },
-
-  handleBenchmarkStart(msg) {
-    this.state.benchmarkRunning = true;
-    this.state.benchmarkTotal = msg.total;
-    this.state.benchmarkTested = 0;
-    this.state.benchmarkPassed = 0;
-    this.state.benchmarkFailed = 0;
-    this.state.benchmarkFastest = 0;
-
-    const startBtn = document.getElementById('btn-start-benchmark');
-    const cancelBtn = document.getElementById('btn-cancel-benchmark');
-    if (startBtn) { startBtn.classList.add('hidden'); startBtn.disabled = true; }
-    if (cancelBtn) cancelBtn.classList.remove('hidden');
-
-    const totalEl = document.getElementById('stat-live-total');
-    const testedEl = document.getElementById('stat-live-tested');
-    const passedEl = document.getElementById('stat-live-passed');
-    const failedEl = document.getElementById('stat-live-failed');
-    const fastestEl = document.getElementById('stat-live-fastest');
-    const stageLabel = document.getElementById('benchmark-stage-label');
-    const statusBadge = document.getElementById('benchmark-status-badge');
-    const headerStatus = document.getElementById('benchmark-header-text');
-    const headerPill = document.getElementById('benchmark-header-status');
-    const bar = document.getElementById('benchmark-progress-bar');
-    const pctEl = document.getElementById('benchmark-progress-pct');
-    const countsEl = document.getElementById('benchmark-progress-counts');
-
-    if (totalEl) totalEl.textContent = msg.total;
-    if (testedEl) testedEl.textContent = 0;
-    if (passedEl) passedEl.textContent = 0;
-    if (failedEl) failedEl.textContent = 0;
-    if (fastestEl) fastestEl.textContent = '— ms';
-    if (bar) bar.style.width = '0%';
-    if (pctEl) pctEl.textContent = '0%';
-    if (countsEl) countsEl.textContent = `0 / ${msg.total} nodes`;
-
-    if (stageLabel) stageLabel.textContent = msg.current_stage || 'Stage 0 Reachability';
-    if (statusBadge) { statusBadge.textContent = 'Running'; statusBadge.className = 'badge badge-primary'; }
-    if (headerStatus) headerStatus.textContent = 'Testing Live';
-    if (headerPill) headerPill.className = 'status-pill active';
-
-    const tbody = document.getElementById('benchmark-live-tbody');
-    if (tbody) {
-      tbody.innerHTML = `<tr><td colspan="7" class="text-center py-4 text-cyan">⚡ Benchmark active across ${msg.threads} parallel threads. Streaming results...</td></tr>`;
-    }
-  },
-
-  handleNodeResult(msg) {
-    this.state.benchmarkTested = msg.tested;
-    this.state.benchmarkPassed = msg.passed;
-    this.state.benchmarkFailed = msg.failed;
-    this.state.benchmarkFastest = msg.fastest_ms;
-
-    const testedEl = document.getElementById('stat-live-tested');
-    const passedEl = document.getElementById('stat-live-passed');
-    const failedEl = document.getElementById('stat-live-failed');
-    const fastestEl = document.getElementById('stat-live-fastest');
-    const stageLabel = document.getElementById('benchmark-stage-label');
-    const bar = document.getElementById('benchmark-progress-bar');
-    const pctEl = document.getElementById('benchmark-progress-pct');
-    const countsEl = document.getElementById('benchmark-progress-counts');
-
-    if (testedEl) testedEl.textContent = msg.tested;
-    if (passedEl) passedEl.textContent = msg.passed;
-    if (failedEl) failedEl.textContent = msg.failed;
-    if (fastestEl && msg.fastest_ms > 0) fastestEl.textContent = `${Math.round(msg.fastest_ms)} ms`;
-    if (stageLabel && msg.current_stage) stageLabel.textContent = msg.current_stage;
-
-    if (this.state.benchmarkTotal > 0) {
-      const pct = Math.min(100, Math.round((msg.tested / this.state.benchmarkTotal) * 100));
-      if (bar) bar.style.width = `${pct}%`;
-      if (pctEl) pctEl.textContent = `${pct}%`;
-      if (countsEl) countsEl.textContent = `${msg.tested} / ${this.state.benchmarkTotal} nodes`;
-    }
-
-    if (msg.detail) {
-      const tbody = document.getElementById('benchmark-live-tbody');
-      if (tbody) {
-        if (tbody.children.length === 1 && tbody.children[0].querySelector('td[colspan]')) {
-          tbody.innerHTML = '';
-        }
-        const rowHtml = this.createNodeRowHtml(msg.detail);
-        tbody.insertAdjacentHTML('afterbegin', rowHtml);
-
-        if (tbody.children.length > 150) {
-          tbody.lastElementChild.remove();
-        }
-      }
-    }
-  },
-
-  handleBenchmarkComplete(msg) {
-    this.state.benchmarkRunning = false;
-    const startBtn = document.getElementById('btn-start-benchmark');
-    const cancelBtn = document.getElementById('btn-cancel-benchmark');
-    if (startBtn) { startBtn.classList.remove('hidden'); startBtn.disabled = false; }
-    if (cancelBtn) cancelBtn.classList.add('hidden');
-
-    const statusBadge = document.getElementById('benchmark-status-badge');
-    const headerStatus = document.getElementById('benchmark-header-text');
-    const headerPill = document.getElementById('benchmark-header-status');
-    const stageLabel = document.getElementById('benchmark-stage-label');
-    const bar = document.getElementById('benchmark-progress-bar');
-    const pctEl = document.getElementById('benchmark-progress-pct');
-
-    if (statusBadge) { statusBadge.textContent = 'Completed'; statusBadge.className = 'badge badge-success'; }
-    if (headerStatus) headerStatus.textContent = 'Finished';
-    if (headerPill) headerPill.className = 'status-pill idle';
-    if (stageLabel) stageLabel.textContent = `Completed in ${msg.duration_s ? msg.duration_s.toFixed(1) : ''}s`;
-    if (bar) bar.style.width = '100%';
-    if (pctEl) pctEl.textContent = '100%';
-
-    this.showToast(`Benchmark complete! ${msg.passed} working, ${msg.failed} failed.`, 'success');
-    this.refreshStatus();
-    this.loadTopNodes();
-  },
-
-  handleBenchmarkCancelled(msg) {
-    this.state.benchmarkRunning = false;
-    const startBtn = document.getElementById('btn-start-benchmark');
-    const cancelBtn = document.getElementById('btn-cancel-benchmark');
-    if (startBtn) { startBtn.classList.remove('hidden'); startBtn.disabled = false; }
-    if (cancelBtn) cancelBtn.classList.add('hidden');
-
-    const statusBadge = document.getElementById('benchmark-status-badge');
-    const headerStatus = document.getElementById('benchmark-header-text');
-    const headerPill = document.getElementById('benchmark-header-status');
-    const stageLabel = document.getElementById('benchmark-stage-label');
-
-    if (statusBadge) { statusBadge.textContent = 'Cancelled'; statusBadge.className = 'badge badge-danger'; }
-    if (headerStatus) headerStatus.textContent = 'Cancelled';
-    if (headerPill) headerPill.className = 'status-pill idle';
-    if (stageLabel) stageLabel.textContent = 'Benchmark cancelled by user';
-
-    this.showToast('Benchmark cancelled', 'info');
-  },
-
-  createNodeRowHtml(d) {
-    let latClass = 'latency-slow';
-    let latText = `${Math.round(d.latency_ms)} ms`;
-    if (!d.success) {
-      latClass = 'latency-failed';
-      latText = 'Timeout';
-    } else if (d.latency_ms < 500) {
-      latClass = 'latency-fast';
-    } else if (d.latency_ms < 1500) {
-      latClass = 'latency-medium';
-    }
-
-    const protoClass = `badge-${(d.protocol || '').toLowerCase()}`;
-    const statusBadge = d.success 
-      ? `<span class="badge badge-success">Passed</span>` 
-      : `<span class="badge badge-danger" title="${this.escapeHtml(d.error || '')}">Fail (${this.escapeHtml(d.stage || '')})</span>`;
-
-    return `
-      <tr>
-        <td>${statusBadge}</td>
-        <td><span class="badge ${protoClass}">${this.escapeHtml((d.protocol || '').toUpperCase())}</span></td>
-        <td>
-          <div class="node-name-cell" title="${this.escapeHtml(d.name || d.address)}">${this.escapeHtml(d.name || d.address)}</div>
-        </td>
-        <td><span class="text-mono text-xs text-muted">${this.escapeHtml(d.address)}:${Number(d.port)}</span></td>
-        <td><span class="latency-badge ${latClass}">${latText}</span></td>
-        <td><span class="text-xs text-muted" title="${this.escapeHtml(d.error || '')}">${this.escapeHtml(d.error ? (d.error.length > 25 ? d.error.substring(0, 25) + '...' : d.error) : d.stage)}</span></td>
-      </tr>
-    `;
-  },
-
-  async startBenchmark() {
-    if (this.state.benchmarkRunning) return;
-
-    const target = document.getElementById('benchmark-target-input')?.value.trim() || 'https://www.google.com/generate_204';
-    const threads = parseInt(document.getElementById('benchmark-threads-input')?.value || '100', 10);
-    const scope = document.getElementById('benchmark-scope-select')?.value || 'all';
-    const proto = document.getElementById('benchmark-proto-select')?.value || '';
-
-    const startBtn = document.getElementById('btn-start-benchmark');
-    const cancelBtn = document.getElementById('btn-cancel-benchmark');
-
-    if (startBtn) startBtn.disabled = true;
-
-    try {
-      const res = await fetch('/api/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target: target, threads: threads, protocol: proto, scope: scope })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to start benchmark');
-
-      this.showToast(`Benchmark launched on ${data.total} configs (${data.threads} threads)`, 'info');
-      if (startBtn) startBtn.classList.add('hidden');
-      if (cancelBtn) cancelBtn.classList.remove('hidden');
-    } catch (e) {
-      this.showToast(e.message, 'error');
-      if (startBtn) startBtn.disabled = false;
-    }
-  },
-
-  async cancelBenchmark() {
-    try {
-      const res = await fetch('/api/test/cancel', { method: 'POST' });
-      const data = await res.json();
-      this.showToast('Benchmark cancelled', 'info');
-    } catch (e) {
-      this.showToast(e.message, 'error');
-    }
-  },
-
-  appendLog(entry) {
-    this.state.logs.push(entry);
-    if (this.state.logs.length > 500) {
-      this.state.logs.shift();
-    }
-
-    const container = document.getElementById('operation-logs-container');
-    if (!container) return;
-
-    if (this.state.activeLogLevel !== 'all' && entry.level !== this.state.activeLogLevel) {
-      return;
-    }
-
-    const line = document.createElement('div');
-    line.className = 'terminal-line';
-    line.innerHTML = `
-      <span class="terminal-ts">[${this.escapeHtml(entry.timestamp)}]</span>
-      <span class="terminal-source ${this.escapeHtml(entry.source)}">[${this.escapeHtml(entry.source)}]</span>
-      <span class="terminal-msg ${this.escapeHtml(entry.level)}">${this.escapeHtml(entry.message)}</span>
-    `;
-
-    container.appendChild(line);
-
-    if (this.state.autoScrollLogs) {
-      container.scrollTop = container.scrollHeight;
-    }
-  },
-
-  renderLogs() {
-    const container = document.getElementById('operation-logs-container');
-    if (!container) return;
-
-    const filtered = this.state.activeLogLevel === 'all'
-      ? this.state.logs
-      : this.state.logs.filter(l => l.level === this.state.activeLogLevel);
-
-    if (filtered.length === 0) {
-      container.innerHTML = '<div class="terminal-line text-muted">[System] No log entries for current filter level.</div>';
-      return;
-    }
-
-    container.innerHTML = filtered.map(entry => `
-      <div class="terminal-line">
-        <span class="terminal-ts">[${this.escapeHtml(entry.timestamp)}]</span>
-        <span class="terminal-source ${this.escapeHtml(entry.source)}">[${this.escapeHtml(entry.source)}]</span>
-        <span class="terminal-msg ${this.escapeHtml(entry.level)}">${this.escapeHtml(entry.message)}</span>
-      </div>
-    `).join('');
-
-    if (this.state.autoScrollLogs) {
-      container.scrollTop = container.scrollHeight;
-    }
-  },
-
-  clearLogs() {
-    this.state.logs = [];
-    const container = document.getElementById('operation-logs-container');
-    if (container) {
-      container.innerHTML = '<div class="terminal-line text-muted">[System] Console output cleared by user.</div>';
-    }
-  },
-
-  async runDeduplication() {
-    const btn = document.getElementById('btn-run-dedup');
-    if (btn) btn.disabled = true;
-
-    try {
-      this.showToast('Scanning database for duplicates...', 'info');
-      const res = await fetch('/api/dedup', { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Deduplication failed');
-
-      if (data.removed > 0) {
-        this.showToast(`Cleaned up ${data.removed} duplicate records out of ${data.scanned} scanned!`, 'success');
-      } else {
-        this.showToast(`Database is 100% clean! Scanned ${data.scanned} unique configs with 0 duplicates.`, 'success');
-      }
-      this.refreshStatus();
-    } catch (e) {
-      this.showToast(e.message, 'error');
-    } finally {
-      if (btn) btn.disabled = false;
     }
   },
 
@@ -1318,6 +789,24 @@ const app = {
     }
   },
 
+  async pasteSource() {
+    const input = document.getElementById('source-paste-input');
+    const btn = document.getElementById('btn-paste-source');
+    const content = input?.value.trim();
+    if (!content) return this.showToast('Paste some configs first', 'error');
+    if (btn) btn.disabled = true;
+    try {
+      const res = await this.api('POST', '/api/sources/paste', { content });
+      input.value = '';
+      this.showToast(`Imported ${res.configs} configs (${res.new} new). Testing auto profiles...`, 'success');
+      this.refreshStatus();
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  },
+
   async toggleSource(id, enabled) {
     try {
       await this.api('POST', '/api/sources/toggle', { id, enabled });
@@ -1346,41 +835,107 @@ const app = {
     }
   },
 
+  // Profiles are a stack of cards, one per built-in profile type. Each card keeps a
+  // stable skeleton: its live part is redrawn on every poll, while an open settings
+  // form or results list is left alone so typing and scrolling are not lost.
   renderProfiles() {
-    const tbody = document.getElementById('profiles-tbody');
-    if (!tbody) return;
+    const box = document.getElementById('profile-cards');
+    if (!box) return;
     const profiles = this.state.profiles || [];
+    box.querySelectorAll(':scope > :not(.profile-card)').forEach(el => el.remove());
     if (!profiles.length) {
-      tbody.innerHTML = `<tr><td colspan="7" class="text-muted text-center py-4">No profiles yet. Create one with the form above.</td></tr>`;
+      box.insertAdjacentHTML('beforeend', '<div class="glass-card text-muted">No profile types.</div>');
       return;
     }
-    tbody.innerHTML = profiles.map(p => {
-      const best = p.nodes && p.nodes.length ? p.nodes[0] : null;
-      let state;
-      if (!p.enabled) state = '<span class="badge">Disabled</span>';
-      else if (p.error) state = `<span class="badge badge-danger" title="${this.escapeHtml(p.error)}">Error</span>`;
-      else if (!p.active_node) state = '<span class="badge badge-warning">Waiting for nodes</span>';
-      else state = '<span class="badge badge-success">Serving</span>';
-      const active = p.active_node ? this.escapeHtml(p.active_node.name || `${p.active_node.address}:${p.active_node.port}`) : '—';
-      return `
-        <tr>
-          <td class="font-medium">${this.escapeHtml(p.name)}</td>
-          <td class="text-mono">${Number(p.port)}</td>
-          <td class="text-mono text-xs" style="word-break: break-all;">${this.escapeHtml(p.target_url)}</td>
-          <td>${state}</td>
-          <td class="text-xs">${active}<div class="text-muted">${(p.nodes || []).length} ranked nodes</div></td>
-          <td class="text-mono ${best ? 'text-success' : 'text-muted'}">${best ? Math.round(best.latency_ms) + ' ms' : '—'}</td>
-          <td>
-            <div style="display: flex; gap: 0.35rem; flex-wrap: wrap;">
-              <button class="btn btn-secondary btn-sm" data-action="profile-copy" data-scheme="socks5" data-id="${Number(p.id)}" title="Copy SOCKS5 URL">SOCKS5</button>
-              <button class="btn btn-secondary btn-sm" data-action="profile-copy" data-scheme="http" data-id="${Number(p.id)}" title="Copy HTTP proxy URL">HTTP</button>
-              <button class="btn btn-secondary btn-sm" data-action="profile-edit" data-id="${Number(p.id)}">Edit</button>
-              <button class="btn btn-danger btn-sm" data-action="profile-delete" data-id="${Number(p.id)}">Delete</button>
-            </div>
-          </td>
-        </tr>
-      `;
-    }).join('');
+    profiles.forEach(p => {
+      let card = document.getElementById(`profile-card-${Number(p.id)}`);
+      if (!card) {
+        card = document.createElement('div');
+        card.id = `profile-card-${Number(p.id)}`;
+        card.className = 'profile-card';
+        card.innerHTML = '<div class="pc-live"></div><div class="pc-settings" hidden></div><div class="pc-results" hidden></div>';
+        box.appendChild(card);
+      }
+      card.querySelector('.pc-live').innerHTML = this.profileCardHTML(p);
+    });
+  },
+
+  profileCardHTML(p) {
+    const id = Number(p.id);
+    const type = p.type || {};
+    let state, statusClass;
+    if (!p.enabled) { state = '<span class="badge">Disabled</span>'; statusClass = 'off'; }
+    else if (p.error) { state = `<span class="badge badge-danger" title="${this.escapeHtml(p.error)}">Port error</span>`; statusClass = 'error'; }
+    else if (!p.active_node) { state = '<span class="badge badge-warning">No candidate yet</span>'; statusClass = 'warn'; }
+    else { state = '<span class="badge badge-success">Serving</span>'; statusClass = 'serving'; }
+
+    const st = p.stats;
+    const box = (label, value, hint) => `<div class="pc-metric" title="${this.escapeHtml(hint)}"><span class="pc-metric-value">${value}</span><span class="pc-metric-label">${this.escapeHtml(label)}</span></div>`;
+    const funnel = st ? `<div class="pc-funnel">
+        ${box('configs', Number(st.configs), 'Stored configs')}
+        ${box('reachable', Number(st.reachable), 'Accepted a TCP connection')}
+        ${box(`reach ${type.name || 'service'}`, Number(st.reached), 'Step 1: passed the quick filter (no account used)')}
+        ${box('checked', Number(st.checked), 'Step 2: got the real check')}
+        ${box('candidates', Number(st.passed), 'Passed the real check')}
+        ${box('best', st.best_ms ? Math.round(st.best_ms) + ' ms' : '—', 'Response time of the best candidate')}
+      </div>` : '<div class="text-xs text-muted mb-2">Not tested yet.</div>';
+    const tally = (m, cls) => Object.entries(m || {}).sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => `<span class="badge ${cls}">${this.escapeHtml(k || 'no answer')} ${Number(n)}</span>`).join(' ');
+    const labels = st && (Object.keys(st.passing || {}).length || Object.keys(st.failing || {}).length)
+      ? `<div class="pc-labels">${tally(st.passing, 'badge-success')} ${tally(st.failing, 'badge-danger')}</div>` : '';
+    const progress = (this.state.progress || {})[id];
+    const outcome = progress
+      ? `<div class="text-xs text-amber mb-2">⟳ ${this.escapeHtml(progress)}</div>`
+      : (st ? `<div class="text-xs text-muted mb-2">Last test ${this.fmtTime(st.at)}: ${this.escapeHtml(st.outcome)}</div>` : '');
+    const best = p.nodes && p.nodes.length ? p.nodes[0] : null;
+    const active = p.active_node
+      ? `${this.escapeHtml(p.active_node.name || `${p.active_node.address}:${p.active_node.port}`)}${best ? ` <span class="text-muted">· ${this.escapeHtml(best.label || '')} ${Math.round(best.latency_ms)} ms</span>` : ''}`
+      : '—';
+
+    const micro = [];
+    if (st) {
+      micro.push(`${Number(st.passed)} candidates`);
+      if (st.best_ms) micro.push(`best ${Math.round(st.best_ms)} ms`);
+    } else {
+      micro.push('Not tested yet');
+    }
+    if (p.auto_test) micro.push(`auto ${this.escapeHtml(p.test_interval || '30m')}`);
+    micro.push(`:${Number(p.port)}`);
+    const open = !!document.getElementById(`profile-card-${id}`)?.classList.contains('expanded');
+
+    return `
+      <div class="pc-summary is-${statusClass}" data-action="profile-toggle" data-id="${id}" role="button" tabindex="0" aria-expanded="${open}">
+        <div>
+          <div class="pc-summary-title"><span class="card-title">${this.escapeHtml(p.name)}</span> ${state}</div>
+          <div class="pc-summary-sub">${this.escapeHtml(micro.join(' · '))}</div>
+        </div>
+        <span class="pc-chevron" aria-hidden="true">›</span>
+      </div>
+      <div class="pc-detail">
+      ${this.accountLine(p)}
+      <div class="text-xs text-muted mb-3">${this.escapeHtml(type.description || '')}</div>
+      <div class="pc-port mb-3">
+        <span class="text-mono">:${Number(p.port)}</span>
+        <button class="btn btn-secondary btn-sm" data-action="profile-copy" data-scheme="socks5" data-id="${id}" title="Copy SOCKS5 URL">SOCKS5</button>
+        <button class="btn btn-secondary btn-sm" data-action="profile-copy" data-scheme="http" data-id="${id}" title="Copy HTTP proxy URL">HTTP</button>
+      </div>
+      ${funnel}${labels}${outcome}
+      <div class="text-xs mb-3"><span class="text-muted">Active node:</span> ${active} <span class="text-muted">· ${(p.nodes || []).length} candidates</span></div>
+      <div class="pc-actions">
+        <button class="btn btn-primary btn-sm" data-action="profile-test" data-id="${id}" title="${this.state.optimizerBusy ? 'A benchmark is already running — wait for it to finish' : "Run this profile's full test now"}" ${this.state.optimizerBusy ? 'disabled' : ''}>Test now</button>
+        <button class="btn btn-secondary btn-sm" data-action="profile-results" data-id="${id}">Checked configs</button>
+        <button class="btn btn-secondary btn-sm" data-action="profile-settings" data-id="${id}">Settings</button>
+      </div>
+      </div>`;
+  },
+
+  // toggleProfileCard opens or closes a profile card. The open state is a class on the
+  // card element, which survives the poll that redraws the card's contents.
+  toggleProfileCard(id) {
+    const card = document.getElementById(`profile-card-${id}`);
+    if (!card) return;
+    const open = card.classList.toggle('expanded');
+    card.querySelector('.pc-summary')?.setAttribute('aria-expanded', String(open));
   },
 
   serverHost() {
@@ -1395,53 +950,227 @@ const app = {
     this.copyToClipboard(`${scheme}://${creds}@${this.serverHost()}:${p.port}`);
   },
 
-  editProfile(id) {
+  cardPanel(id, cls) {
+    const card = document.getElementById(`profile-card-${Number(id)}`);
+    return card ? card.querySelector(cls) : null;
+  },
+
+  // toggleSettings opens the profile's settings form inside its card.
+  toggleSettings(id) {
+    const panel = this.cardPanel(id, '.pc-settings');
     const p = (this.state.profiles || []).find(x => x.id === id);
-    if (!p) return;
-    document.getElementById('profile-id').value = p.id;
-    document.getElementById('profile-name').value = p.name;
-    document.getElementById('profile-target').value = p.target_url;
-    document.getElementById('profile-port').value = p.port;
-    document.getElementById('profile-username').value = p.username;
-    document.getElementById('profile-password').value = p.password;
-    document.getElementById('profile-enabled').checked = p.enabled;
-    document.getElementById('profile-form-title').textContent = `Edit Profile: ${p.name}`;
-    document.getElementById('profile-name').focus();
+    if (!panel || !p) return;
+    if (!panel.hidden) { panel.hidden = true; panel.innerHTML = ''; return; }
+    const set = p.secrets_set || [];
+    const login = (p.type || {}).login;
+    const account = login ? `<div class="form-group mb-3"><label class="form-label">${this.escapeHtml(login.provider)} account</label>
+      ${this.accountLine(p)}
+      <div class="pc-actions" style="margin-top: 0.4rem;">
+        <button class="btn btn-primary btn-sm" type="button" data-action="profile-login" data-id="${Number(p.id)}">Sign in with ${this.escapeHtml(login.provider)}</button>
+        ${set.includes(login.token_field) ? `<button class="btn btn-secondary btn-sm" type="button" data-action="profile-logout" data-id="${Number(p.id)}">Sign out</button>` : ''}
+      </div>
+      <span class="text-muted text-xs mt-1">Opens ${this.escapeHtml(login.provider)}'s sign-in page and comes back here. Needs the client secret below.</span></div>` : '';
+    // The type's own settings. Secrets are never sent to the browser: empty keeps the saved one.
+    const fields = ((p.type || {}).fields || []).map(f => {
+      const ph = f.secret ? (set.includes(f.key) ? 'Saved. Leave empty to keep it.' : 'Not set') : '';
+      const input = f.secret
+        ? `<textarea data-setting="${this.escapeHtml(f.key)}" class="form-input text-mono text-xs" rows="2" autocomplete="off" placeholder="${ph}"></textarea>`
+        : `<input type="text" data-setting="${this.escapeHtml(f.key)}" class="form-input" value="${this.escapeHtml((p.settings || {})[f.key] || '')}">`;
+      return `<div class="form-group mb-3"><label class="form-label">${this.escapeHtml(f.label)}</label>${input}
+        <span class="text-muted text-xs mt-1">${this.escapeHtml(f.help)}</span></div>`;
+    }).join('');
+    // Per-profile automated testing. This is the only place a profile's testing is scheduled.
+    const ivs = { '5m': '5 minutes', '15m': '15 minutes', '30m': '30 minutes', '1h': '1 hour', '3h': '3 hours', '6h': '6 hours', '12h': '12 hours', '24h': '24 hours' };
+    const curIv = p.test_interval || '30m';
+    const ivOptions = Object.entries(ivs).map(([v, l]) => `<option value="${v}" ${v === curIv ? 'selected' : ''}>${l}</option>`).join('');
+    const autoBlock = `<div class="pc-autotest">
+      <div class="modal-section-title">Automated testing</div>
+      <div class="form-group mb-3">
+        <label class="form-label"><input type="checkbox" data-field="auto_test" ${p.auto_test ? 'checked' : ''}> Re-test this profile automatically</label>
+        <span class="text-muted text-xs">When on, Velox re-benchmarks this profile on its own interval below and may switch the live node. When off, it runs only when you press Test now. This is the only place this profile's testing is scheduled.</span>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="pc-iv-${id}">Re-test every</label>
+        <select id="pc-iv-${id}" data-field="test_interval" class="form-select" ${p.auto_test ? '' : 'disabled'}>${ivOptions}</select>
+      </div>
+    </div>`;
+    panel.innerHTML = `<div class="pc-panel">
+      <div class="two-col-grid">
+        <div>
+          <div class="form-group mb-3"><label class="form-label">Port on this server</label>
+            <input type="number" data-field="port" class="form-input" min="1" max="65535" value="${Number(p.port)}"></div>
+          <div class="form-group mb-3"><label class="form-label">Username</label>
+            <input type="text" data-field="username" class="form-input" autocomplete="off" value="${this.escapeHtml(p.username)}"></div>
+          <div class="form-group mb-3"><label class="form-label">Password</label>
+            <div class="input-group"><input type="text" data-field="password" class="form-input" autocomplete="off" value="${this.escapeHtml(p.password)}">
+            <button class="btn btn-secondary" type="button" data-action="profile-genpw" data-id="${Number(p.id)}">Generate</button></div></div>
+          <div class="form-group mb-3">
+            <label class="form-label"><input type="checkbox" data-field="enabled" ${p.enabled ? 'checked' : ''}> Enabled</label>
+            <span class="text-muted text-xs">Every profile port is reachable from the internet; keep the password strong.</span>
+          </div>
+        </div>
+        <div>${account}${fields}</div>
+      </div>
+      ${autoBlock}
+      <div class="pc-actions">
+        <button class="btn btn-primary" data-action="profile-save" data-id="${Number(p.id)}">Save</button>
+        <button class="btn btn-secondary" data-action="profile-settings" data-id="${Number(p.id)}">Close</button>
+      </div></div>`;
+    panel.hidden = false;
   },
 
-  resetProfileForm() {
-    ['profile-id', 'profile-name', 'profile-target', 'profile-port', 'profile-username', 'profile-password']
-      .forEach(id => { document.getElementById(id).value = ''; });
-    document.getElementById('profile-enabled').checked = true;
-    document.getElementById('profile-form-title').textContent = 'New Profile';
-  },
-
-  async saveProfile() {
+  async saveProfile(id) {
+    const panel = this.cardPanel(id, '.pc-settings');
+    const p = (this.state.profiles || []).find(x => x.id === id);
+    if (!panel || !p) return;
+    const field = (k) => panel.querySelector(`[data-field="${k}"]`);
+    const settings = {};
+    panel.querySelectorAll('[data-setting]').forEach(el => { settings[el.dataset.setting] = el.value; });
     const body = {
-      id: Number(document.getElementById('profile-id').value) || 0,
-      name: document.getElementById('profile-name').value,
-      target_url: document.getElementById('profile-target').value,
-      port: Number(document.getElementById('profile-port').value),
-      username: document.getElementById('profile-username').value,
-      password: document.getElementById('profile-password').value,
-      enabled: document.getElementById('profile-enabled').checked,
+      id,
+      port: Number(field('port').value),
+      username: field('username').value,
+      password: field('password').value,
+      enabled: field('enabled').checked,
+      auto_test: field('auto_test') ? field('auto_test').checked : p.auto_test,
+      test_interval: field('test_interval') ? field('test_interval').value : p.test_interval,
+      settings,
     };
     try {
       await this.api('POST', '/api/profiles', body);
-      this.showToast(body.id ? 'Profile updated' : 'Profile created. Testing nodes for it now...', 'success');
-      this.resetProfileForm();
+      this.showToast('Profile saved.' + (body.enabled && body.auto_test ? ' Testing it now...' : ''), 'success');
+      panel.hidden = true;
+      panel.innerHTML = '';
       this.loadProfiles();
     } catch (e) {
       this.showToast(e.message, 'error');
     }
   },
 
-  async deleteProfile(id) {
-    const p = (this.state.profiles || []).find(x => x.id === id);
-    if (!confirm(`Delete profile "${p ? p.name : id}"? Its port closes immediately.`)) return;
+  // toggleResults lists every config the profile's real check looked at, labeled.
+  async toggleResults(id, refresh) {
+    const panel = this.cardPanel(id, '.pc-results');
+    if (!panel) return;
+    if (!panel.hidden && !refresh) { panel.hidden = true; panel.innerHTML = ''; return; }
     try {
-      await this.api('POST', '/api/profiles/delete', { id });
+      this.state.profileResults = this.state.profileResults || {};
+      this.state.profileResults[id] = await this.api('GET', `/api/profiles/results?id=${Number(id)}`);
+      panel.dataset.all = panel.dataset.all || 'false';
+      this.renderResults(id);
+      panel.hidden = false;
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  renderResults(id) {
+    const panel = this.cardPanel(id, '.pc-results');
+    const all = (this.state.profileResults || {})[id] || [];
+    const prof = (this.state.profiles || []).find(x => Number(x.id) === Number(id));
+    const activeId = prof && prof.active_node ? prof.active_node.id : null;
+    const serving = !!(prof && prof.active_node);
+    const showAll = panel.dataset.all === 'true';
+    const rows = showAll ? all : all.filter(r => r.ok);
+    const activeCell = (r) => {
+      if (!r.ok) return '';
+      if (r.config_id === activeId) return '<span class="badge badge-success">● active</span>';
+      if (!serving) return '';
+      return `<button class="btn btn-secondary btn-sm" data-action="profile-set-active" data-id="${Number(id)}" data-config="${this.escapeHtml(r.config_id)}" title="Serve this node on the profile port">Use</button>`;
+    };
+    const body = rows.length ? rows.map((r, i) => `
+      <tr${r.config_id === activeId ? ' class="pc-row-active"' : ''}>
+        <td class="text-muted">${r.ok ? Number(r.rank) : i + 1}</td>
+        <td>${r.ok ? '<span class="badge badge-success">candidate</span>' : `<span class="badge badge-danger" title="${this.escapeHtml(r.error || '')}">rejected</span>`}</td>
+        <td class="font-medium">${this.escapeHtml(r.label || '—')}</td>
+        <td>${r.ok ? '<span class="badge badge-success">eligible</span>' : (r.label ? '<span class="badge badge-danger">not eligible</span>' : '<span class="text-xs text-muted">no answer</span>')}</td>
+        <td class="text-mono">${r.latency_ms ? Math.round(r.latency_ms) + ' ms' : '—'}</td>
+        <td>${activeCell(r)}</td>
+        <td class="text-xs">${this.escapeHtml(r.name)}</td>
+        <td><span class="badge badge-${this.escapeHtml(r.protocol)}">${this.escapeHtml(r.protocol)}</span></td>
+        <td class="text-mono text-xs">${this.escapeHtml(r.address)}:${Number(r.port)}</td>
+        <td class="text-xs">${r.response ? `<details><summary class="pc-resp-sum">view</summary><pre class="pc-resp">${this.escapeHtml(this.fmtJson(r.response))}</pre></details>` : '—'}</td>
+        <td class="text-xs text-muted">${this.escapeHtml(r.ok ? '' : (r.error || ''))}</td>
+      </tr>`).join('')
+      : `<tr><td colspan="11" class="text-muted text-center py-4">${all.length ? 'No candidates in the last test.' : 'No test results yet.'}</td></tr>`;
+    const candidates = all.filter(r => r.ok).length;
+    panel.innerHTML = `<div class="pc-panel">
+      <div class="pc-actions mb-2">
+        <button class="filter-pill ${showAll ? '' : 'active'}" data-action="profile-results-filter" data-all="false" data-id="${Number(id)}">Candidates (${candidates})</button>
+        <button class="filter-pill ${showAll ? 'active' : ''}" data-action="profile-results-filter" data-all="true" data-id="${Number(id)}">All checked (${all.length})</button>
+        <button class="btn btn-secondary btn-sm" data-action="profile-results-refresh" data-id="${Number(id)}">Refresh</button>
+        <span class="text-xs text-muted">From the last test's real check (step 2). Candidates are ranked by response time; press Use to serve a different one until the next test.</span>
+      </div>
+      <div class="table-responsive"><table class="data-table">
+        <thead><tr><th style="width: 40px;">#</th><th style="width: 100px;">Result</th><th style="width: 70px;">Country</th><th style="width: 90px;">Eligible</th><th style="width: 80px;">Delay</th><th style="width: 80px;">Active</th><th>Config</th><th style="width: 100px;">Protocol</th><th>Server</th><th style="width: 110px;">Response</th><th>Why rejected</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table></div></div>`;
+  },
+
+  // setActiveNode serves a chosen candidate on the profile port until the next test.
+  async setActiveNode(id, configId) {
+    try {
+      await this.api('POST', '/api/profiles/active', { id, config_id: configId });
+      this.showToast('Active node switched', 'success');
+      await this.loadProfiles();   // refresh active_node
+      this.renderResults(id);      // move the "active" marker
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  // fmtJson pretty-prints a stored response body, or returns it unchanged if it is not JSON.
+  fmtJson(raw) {
+    try { return JSON.stringify(JSON.parse(raw), null, 2); } catch { return raw; }
+  },
+
+  // accountLine says who a profile with account sign-in is signed in as.
+  accountLine(p) {
+    const login = (p.type || {}).login;
+    if (!login) return '';
+    if (p.account) return `<div class="text-xs text-success">Signed in as ${this.escapeHtml(p.account)}</div>`;
+    if ((p.secrets_set || []).includes(login.token_field)) return '<div class="text-xs text-muted">Pasted session</div>';
+    return '<div class="text-xs text-amber">Not signed in</div>';
+  },
+
+  async loginProfile(id) {
+    const panel = this.cardPanel(id, '.pc-settings');
+    const el = panel && panel.querySelector('[data-setting="client_secret"]');
+    try {
+      const res = await this.api('POST', '/api/profiles/login', { id, client_secret: el ? el.value : '' });
+      window.location.href = res.url; // the provider sends the browser back to this dashboard
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  async logoutProfile(id) {
+    if (!confirm('Sign this profile out? Velox forgets its session; candidates already found keep serving.')) return;
+    try {
+      await this.api('POST', '/api/profiles/logout', { id });
+      this.showToast('Signed out.', 'success');
+      const panel = this.cardPanel(id, '.pc-settings');
+      if (panel) { panel.hidden = true; panel.innerHTML = ''; }
       this.loadProfiles();
+    } catch (e) {
+      this.showToast(e.message, 'error');
+    }
+  },
+
+  // showLoginResult reports a sign-in the provider just redirected back from.
+  showLoginResult() {
+    const q = new URLSearchParams(window.location.search);
+    if (!q.has('login') && !q.has('login_error')) return;
+    history.replaceState(null, '', '/');
+    this.switchTab('profiles');
+    if (q.has('login')) this.showToast(`Signed in${q.get('login') ? ' as ' + q.get('login') : ''}. Press Test now to find candidates.`, 'success');
+    else this.showToast('Sign-in failed: ' + q.get('login_error'), 'error');
+  },
+
+  async testProfile(id) {
+    const p = (this.state.profiles || []).find(x => x.id === id);
+    try {
+      await this.api('POST', '/api/profiles/test', { id });
+      this.showToast(`Testing nodes for "${p ? p.name : id}"...`, 'info');
     } catch (e) {
       this.showToast(e.message, 'error');
     }
@@ -1450,7 +1179,7 @@ const app = {
   async runOptimizer(kind) {
     try {
       await this.api('POST', '/api/optimizer/run', { kind });
-      this.showToast(kind === 'refresh' ? 'Fetching all subscriptions, then re-testing...' : 'Re-testing all profiles...', 'info');
+      this.showToast('Fetching all subscriptions...', 'info');
     } catch (e) {
       this.showToast(e.message, 'error');
     }
@@ -1458,13 +1187,13 @@ const app = {
 
   async saveSchedule() {
     const body = {
-      cycle_interval: document.getElementById('opt-cycle-interval').value,
       refresh_interval: document.getElementById('opt-refresh-interval').value,
       config_max_age: document.getElementById('opt-max-age').value,
     };
     try {
       this.renderOptimizer(await this.api('POST', '/api/optimizer', body));
       this.showToast('Schedule saved', 'success');
+      document.getElementById('optimizer-dialog')?.close();
     } catch (e) {
       this.showToast(e.message, 'error');
     }
@@ -1473,534 +1202,32 @@ const app = {
   renderOptimizer(st) {
     if (!st) return;
     const phaseText = { idle: 'Idle', refreshing: 'Fetching subscriptions', testing: 'Testing nodes' }[st.phase] || st.phase;
+    const busy = st.phase !== 'idle';
+    this.state.optimizerBusy = busy;
+    // Reflect the run guard in the UI: while a benchmark runs, no new run can be started.
+    const reason = 'A benchmark is already running — wait for it to finish';
+    const refreshBtn = document.getElementById('btn-run-refresh');
+    if (refreshBtn) { refreshBtn.disabled = busy; refreshBtn.title = busy ? reason : 'Fetch all subscriptions now'; }
+    document.querySelectorAll('[data-action="profile-test"]').forEach(b => {
+      b.disabled = busy; b.title = busy ? reason : "Run this profile's full test now";
+    });
     const pill = document.getElementById('optimizer-status-pill');
     if (pill) pill.className = `status-pill ${st.phase === 'idle' ? 'idle' : 'active'}`;
     const set = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
-    set('optimizer-status-text', `Optimizer: ${phaseText}`);
+    set('optimizer-status-text', phaseText === 'Idle' ? 'Velox: Idle' : `Velox: ${phaseText}`);
     set('stat-optimizer-phase', phaseText);
     set('opt-phase', phaseText);
-    set('opt-last-cycle', this.fmtTime(st.last_cycle_at));
-    set('opt-next-cycle', this.fmtTime(st.next_cycle_at));
     set('opt-last-refresh', this.fmtTime(st.last_refresh_at));
     set('opt-next-refresh', this.fmtTime(st.next_refresh_at));
     set('opt-summary', st.last_summary || '—');
     // Fill the schedule form once, so polling does not overwrite the admin's edits.
-    const form = document.getElementById('opt-cycle-interval');
+    const form = document.getElementById('opt-refresh-interval');
     if (form && !form.dataset.loaded) {
-      form.value = st.cycle_interval;
-      document.getElementById('opt-refresh-interval').value = st.refresh_interval;
+      form.value = st.refresh_interval;
       document.getElementById('opt-max-age').value = st.config_max_age;
       form.dataset.loaded = '1';
     }
   },
-
-  // ==========================================================================
-  // TEST METHODOLOGY & EXECUTION CHAIN
-  // ==========================================================================
-
-  toggleBenchmarkSettings() {
-    const panel = document.getElementById('benchmark-settings-panel');
-    const chevron = document.getElementById('benchmark-settings-chevron');
-    const btn = document.getElementById('btn-toggle-benchmark-settings');
-    if (!panel) return;
-
-    const isHidden = panel.classList.contains('hidden');
-    if (isHidden) {
-      panel.classList.remove('hidden');
-      if (chevron) chevron.textContent = '▲';
-      if (btn) btn.classList.add('active');
-    } else {
-      panel.classList.add('hidden');
-      if (chevron) chevron.textContent = '▼';
-      if (btn) btn.classList.remove('active');
-    }
-  },
-
-  syncTargetURLToMethodology(url) {
-    if (!url || !this.state.methodology || !this.state.methodology.steps) return;
-    let modified = false;
-    this.state.methodology.steps.forEach(step => {
-      if (step.type === 'http_delay') {
-        step.target_url = url;
-        modified = true;
-      }
-    });
-    if (modified) {
-      document.querySelectorAll('.step-target-sync-url').forEach(el => {
-        el.textContent = url;
-      });
-    }
-  },
-
-  async loadMethodology() {
-    try {
-      const res = await fetch('/api/benchmark/methodology');
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data.chain) {
-        this.state.methodology = data.chain;
-        const httpStep = (data.chain.steps || []).find(s => s.type === 'http_delay' && s.target_url);
-        if (httpStep && httpStep.target_url) {
-          const targetInput = document.getElementById('benchmark-target-input');
-          if (targetInput) targetInput.value = httpStep.target_url;
-          document.querySelectorAll('.preset-btn').forEach(btn => {
-            btn.classList.toggle('active', btn.dataset.url === httpStep.target_url);
-          });
-        }
-        this.renderMethodology();
-      }
-    } catch (e) {
-      console.error('Failed to load methodology', e);
-    }
-  },
-
-  renderMethodology() {
-    const chain = this.state.methodology;
-    if (!chain) return;
-
-    // Update count badge
-    const countBadge = document.getElementById('methodology-steps-count');
-    if (countBadge) {
-      const activeCount = (chain.steps || []).filter(s => s.enabled).length;
-      countBadge.textContent = `${activeCount} Active / ${chain.steps ? chain.steps.length : 0} Steps`;
-    }
-
-    // Update scoring mode select
-    const modeSelect = document.getElementById('methodology-scoring-mode');
-    if (modeSelect) {
-      modeSelect.value = chain.scoring_mode || 'primary_test';
-    }
-
-    const container = document.getElementById('methodology-steps-container');
-    if (!container) return;
-
-    if (!chain.steps || chain.steps.length === 0) {
-      container.innerHTML = `<div class="text-center py-4 text-muted">No test steps configured. Click "+ Add Step" or choose a Preset.</div>`;
-      return;
-    }
-
-    // Sort by priority before rendering
-    chain.steps.sort((a, b) => (a.priority || 0) - (b.priority || 0));
-
-    const currentTargetURL = document.getElementById('benchmark-target-input')?.value.trim() || 'https://www.google.com/generate_204';
-
-    let html = '';
-    chain.steps.forEach((step, idx) => {
-      const isFirst = idx === 0;
-      const isLast = idx === chain.steps.length - 1;
-      const disabledClass = !step.enabled ? 'disabled-step' : '';
-      const typeClass = `type-${step.type}`;
-
-      let typeBadge = '';
-      if (step.type === 'tcp_ping') {
-        typeBadge = `<span class="badge badge-cyan">TCP Ping</span>`;
-      } else if (step.type === 'tls_handshake') {
-        typeBadge = `<span class="badge badge-purple">TLS Handshake</span>`;
-      } else if (step.type === 'http_delay') {
-        typeBadge = `<span class="badge badge-emerald">HTTP Delay Toward URL</span>`;
-      }
-
-      const necessaryBadge = step.necessary
-        ? `<span class="step-badge-necessary" title="Hard Filter: Failure disqualifies node and skips subsequent stages">⚠️ Necessary (Hard Filter)</span>`
-        : `<span class="step-badge-optional" title="Optional: Failure does not disqualify node">Optional</span>`;
-
-      const primaryBadge = step.is_primary
-        ? `<span class="step-badge-primary">★ Primary Score</span>`
-        : '';
-
-      if (step.type === 'http_delay' && !step.target_url) {
-        step.target_url = currentTargetURL;
-      }
-
-      const targetField = step.type === 'http_delay'
-        ? `
-          <div class="step-param-item" style="grid-column: span 2;">
-            <label class="step-param-label">Target URL (Bound to Quick Toolbar)</label>
-            <div class="step-param-sync-text" title="Target URL is configured centrally in the toolbar above">
-              <span class="icon">🔗</span>
-              <span class="text-mono truncate step-target-sync-url">${this.escapeHtml(step.target_url || currentTargetURL)}</span>
-              <span class="badge badge-xs badge-cyan ml-auto">Synced</span>
-            </div>
-          </div>
-          <div class="step-param-item">
-            <label class="step-param-label">Expected Codes (CSV)</label>
-            <input type="text" class="step-param-input" value="${(step.expect_codes || [200, 204]).join(', ')}" onchange="app.updateMethodologyStepExpectCodes(${idx}, this.value)">
-          </div>
-        `
-        : '';
-
-      html += `
-        <div class="methodology-step-card ${typeClass} ${disabledClass}">
-          <div class="step-card-header">
-            <div class="step-meta-left">
-              <span class="step-badge-priority">Stage #${idx + 1}</span>
-              ${typeBadge}
-              <input type="text" class="step-param-input font-bold" style="width: 170px;" value="${this.escapeHtml(step.name || '')}" onchange="app.updateMethodologyStep(${idx}, 'name', this.value)">
-              ${necessaryBadge}
-              ${primaryBadge}
-            </div>
-
-            <div class="step-actions-right">
-              <label class="checkbox-label text-xs mr-2">
-                <input type="checkbox" ${step.necessary ? 'checked' : ''} onchange="app.toggleMethodologyNecessary(${idx})">
-                <span>Necessary</span>
-              </label>
-
-              <label class="checkbox-label text-xs mr-2">
-                <input type="checkbox" ${step.enabled ? 'checked' : ''} onchange="app.toggleMethodologyStep(${idx})">
-                <span>Enabled</span>
-              </label>
-
-              <button class="btn btn-secondary btn-xs" ${isFirst ? 'disabled' : ''} onclick="app.moveMethodologyStep(${idx}, -1)" title="Move Step Up">▲</button>
-              <button class="btn btn-secondary btn-xs" ${isLast ? 'disabled' : ''} onclick="app.moveMethodologyStep(${idx}, 1)" title="Move Step Down">▼</button>
-              <button class="btn btn-danger btn-xs" onclick="app.removeMethodologyStep(${idx})" title="Remove Step">🗑</button>
-            </div>
-          </div>
-
-          <div class="step-params-grid">
-            <div class="step-param-item">
-              <label class="step-param-label">Timeout (ms)</label>
-              <input type="number" class="step-param-input" value="${step.timeout_ms || 3000}" min="500" max="30000" step="100" onchange="app.updateMethodologyStep(${idx}, 'timeout_ms', parseInt(this.value, 10))">
-            </div>
-
-            <div class="step-param-item">
-              <label class="step-param-label">Scoring Weight (0.0 - 1.0)</label>
-              <input type="number" class="step-param-input" value="${step.weight !== undefined ? step.weight : 0.5}" min="0" max="1" step="0.1" onchange="app.updateMethodologyStep(${idx}, 'weight', parseFloat(this.value))">
-            </div>
-
-            <div class="step-param-item" style="display: flex; justify-content: center; align-items: flex-start;">
-              <label class="step-param-label">Primary Metric</label>
-              <label class="checkbox-label text-xs mt-1">
-                <input type="radio" name="methodology-primary-radio" ${step.is_primary ? 'checked' : ''} onchange="app.setMethodologyPrimary(${idx})">
-                <span>Use as Primary</span>
-              </label>
-            </div>
-
-            ${targetField}
-          </div>
-        </div>
-      `;
-
-      if (!isLast) {
-        html += `
-          <div class="step-connector-flow">
-            <div class="step-connector-line"></div>
-            <span class="step-connector-arrow">↓</span>
-            <span class="text-xs text-muted">Survivors advance to next stage (Failing Necessary step eliminates node)</span>
-            <span class="step-connector-arrow">↓</span>
-            <div class="step-connector-line"></div>
-          </div>
-        `;
-      }
-    });
-
-    container.innerHTML = html;
-  },
-
-  onScoringModeChange(mode) {
-    if (!this.state.methodology) return;
-    this.state.methodology.scoring_mode = mode;
-  },
-
-  moveMethodologyStep(idx, direction) {
-    const chain = this.state.methodology;
-    if (!chain || !chain.steps) return;
-    const targetIdx = idx + direction;
-    if (targetIdx < 0 || targetIdx >= chain.steps.length) return;
-
-    const temp = chain.steps[idx];
-    chain.steps[idx] = chain.steps[targetIdx];
-    chain.steps[targetIdx] = temp;
-
-    // Normalize priorities
-    chain.steps.forEach((s, i) => { s.priority = i + 1; });
-    this.renderMethodology();
-  },
-
-  toggleMethodologyStep(idx) {
-    const chain = this.state.methodology;
-    if (!chain || !chain.steps || !chain.steps[idx]) return;
-    chain.steps[idx].enabled = !chain.steps[idx].enabled;
-    this.renderMethodology();
-  },
-
-  toggleMethodologyNecessary(idx) {
-    const chain = this.state.methodology;
-    if (!chain || !chain.steps || !chain.steps[idx]) return;
-    chain.steps[idx].necessary = !chain.steps[idx].necessary;
-    this.renderMethodology();
-  },
-
-  setMethodologyPrimary(idx) {
-    const chain = this.state.methodology;
-    if (!chain || !chain.steps) return;
-    chain.steps.forEach((s, i) => {
-      s.is_primary = (i === idx);
-    });
-    this.renderMethodology();
-  },
-
-  updateMethodologyStep(idx, field, value) {
-    const chain = this.state.methodology;
-    if (!chain || !chain.steps || !chain.steps[idx]) return;
-    chain.steps[idx][field] = value;
-  },
-
-  updateMethodologyStepExpectCodes(idx, codesStr) {
-    const chain = this.state.methodology;
-    if (!chain || !chain.steps || !chain.steps[idx]) return;
-    const codes = codesStr.split(',')
-      .map(c => parseInt(c.trim(), 10))
-      .filter(c => !isNaN(c) && c > 0);
-    chain.steps[idx].expect_codes = codes;
-  },
-
-  removeMethodologyStep(idx) {
-    const chain = this.state.methodology;
-    if (!chain || !chain.steps) return;
-    if (chain.steps.length <= 1) {
-      this.showToast('At least one step must remain in the chain', 'error');
-      return;
-    }
-    chain.steps.splice(idx, 1);
-    chain.steps.forEach((s, i) => { s.priority = i + 1; });
-    this.renderMethodology();
-  },
-
-  openAddStepModal() {
-    const modal = document.getElementById('modal-add-step');
-    if (modal) {
-      modal.classList.remove('hidden');
-      const targetInput = document.getElementById('new-step-target');
-      const currentTarget = document.getElementById('benchmark-target-input')?.value.trim();
-      if (targetInput && currentTarget) {
-        targetInput.value = currentTarget;
-      }
-    }
-  },
-
-  closeAddStepModal() {
-    const modal = document.getElementById('modal-add-step');
-    if (modal) modal.classList.add('hidden');
-  },
-
-  onNewStepTypeChange(type) {
-    const wrap = document.getElementById('new-step-target-wrap');
-    const nameInput = document.getElementById('new-step-name');
-    if (wrap) wrap.style.display = (type === 'http_delay') ? 'block' : 'none';
-    if (nameInput) {
-      if (type === 'tcp_ping') nameInput.value = 'TCP Reachability';
-      else if (type === 'tls_handshake') nameInput.value = 'TLS Handshake';
-      else if (type === 'http_delay') nameInput.value = 'HTTP Delay Toward URL';
-    }
-  },
-
-  confirmAddStep() {
-    const chain = this.state.methodology;
-    if (!chain) return;
-
-    const typeRadio = document.querySelector('input[name="new-step-type"]:checked');
-    const type = typeRadio ? typeRadio.value : 'tcp_ping';
-    const nameInput = document.getElementById('new-step-name');
-    const name = (nameInput && nameInput.value.trim()) || (type === 'http_delay' ? 'HTTP Delay' : (type === 'tls_handshake' ? 'TLS Handshake' : 'TCP Reachability'));
-    const timeoutInput = document.getElementById('new-step-timeout');
-    const timeoutMS = timeoutInput ? parseInt(timeoutInput.value, 10) || 3000 : 3000;
-    const targetInput = document.getElementById('new-step-target');
-    const targetURL = targetInput ? targetInput.value.trim() : (document.getElementById('benchmark-target-input')?.value.trim() || 'https://www.google.com/generate_204');
-    const necessaryCheck = document.getElementById('new-step-necessary');
-    const necessary = necessaryCheck ? necessaryCheck.checked : true;
-
-    if (!chain.steps) chain.steps = [];
-    const newStep = {
-      id: `step_${type}_${Date.now()}`,
-      type: type,
-      name: name,
-      enabled: true,
-      necessary: necessary,
-      priority: chain.steps.length + 1,
-      weight: 0.5,
-      is_primary: type === 'http_delay' && !chain.steps.some(s => s.is_primary),
-      timeout_ms: timeoutMS,
-      target_url: type === 'http_delay' ? targetURL : '',
-      expect_codes: type === 'http_delay' ? [200, 204] : []
-    };
-
-    chain.steps.push(newStep);
-    this.closeAddStepModal();
-    this.renderMethodology();
-    this.showToast(`Added step "${name}" to chain`, 'info');
-  },
-
-  async applyMethodologyPreset(preset) {
-    let steps = [];
-    let scoringMode = 'primary_test';
-    const currentTarget = document.getElementById('benchmark-target-input')?.value.trim() || 'https://www.google.com/generate_204';
-
-    switch (preset) {
-      case 'url_only':
-        steps = [
-          {
-            id: 'step_http_delay',
-            type: 'http_delay',
-            name: 'Direct HTTP Delay',
-            description: 'Direct measurement of proxy response time toward target URL',
-            enabled: true,
-            necessary: true,
-            priority: 1,
-            weight: 1.0,
-            is_primary: true,
-            timeout_ms: 7000,
-            target_url: currentTarget,
-            expect_codes: [200, 204]
-          }
-        ];
-        scoringMode = 'primary_test';
-        break;
-
-      case 'tcp_only':
-        steps = [
-          {
-            id: 'step_tcp_ping',
-            type: 'tcp_ping',
-            name: 'TCP Port Ping',
-            description: 'Fast host:port socket connect reachability check',
-            enabled: true,
-            necessary: true,
-            priority: 1,
-            weight: 1.0,
-            is_primary: true,
-            timeout_ms: 2500
-          }
-        ];
-        scoringMode = 'primary_test';
-        break;
-
-      case 'deep':
-        steps = [
-          {
-            id: 'step_tcp_ping',
-            type: 'tcp_ping',
-            name: 'TCP Reachability',
-            description: 'Fast socket connect to host:port',
-            enabled: true,
-            necessary: true,
-            priority: 1,
-            weight: 0.2,
-            is_primary: false,
-            timeout_ms: 2500
-          },
-          {
-            id: 'step_tls_handshake',
-            type: 'tls_handshake',
-            name: 'TLS / REALITY Handshake',
-            description: 'Strict cryptographic certificate and SNI validation',
-            enabled: true,
-            necessary: true,
-            priority: 2,
-            weight: 0.3,
-            is_primary: false,
-            timeout_ms: 4000
-          },
-          {
-            id: 'step_http_delay',
-            type: 'http_delay',
-            name: 'HTTP URL Real Delay',
-            description: 'Measured round-trip time toward Google endpoint',
-            enabled: true,
-            necessary: true,
-            priority: 3,
-            weight: 0.5,
-            is_primary: true,
-            timeout_ms: 8000,
-            target_url: currentTarget,
-            expect_codes: [200, 204]
-          }
-        ];
-        scoringMode = 'weighted_average';
-        break;
-
-      case 'standard':
-      default:
-        steps = [
-          {
-            id: 'step_tcp_ping',
-            type: 'tcp_ping',
-            name: 'TCP Port Ping',
-            description: 'Fast socket connect to proxy host:port',
-            enabled: true,
-            necessary: true,
-            priority: 1,
-            weight: 0.2,
-            is_primary: false,
-            timeout_ms: 2500
-          },
-          {
-            id: 'step_tls_handshake',
-            type: 'tls_handshake',
-            name: 'TLS / REALITY Handshake',
-            description: 'TLS handshake with SNI and ALPN negotiation',
-            enabled: true,
-            necessary: false,
-            priority: 2,
-            weight: 0.2,
-            is_primary: false,
-            timeout_ms: 3500
-          },
-          {
-            id: 'step_http_delay',
-            type: 'http_delay',
-            name: 'HTTP URL Real Delay',
-            description: 'In-process proxy GET measuring round-trip TTFB latency',
-            enabled: true,
-            necessary: true,
-            priority: 3,
-            weight: 0.6,
-            is_primary: true,
-            timeout_ms: 7000,
-            target_url: currentTarget,
-            expect_codes: [200, 204]
-          }
-        ];
-        scoringMode = 'primary_test';
-        break;
-    }
-
-    this.state.methodology = {
-      scoring_mode: scoringMode,
-      steps: steps
-    };
-
-    this.renderMethodology();
-    await this.saveMethodology();
-    this.showToast(`Applied preset: ${preset}`, 'info');
-  },
-
-  async saveMethodology() {
-    const chain = this.state.methodology;
-    if (!chain) return;
-
-    const btn = document.getElementById('btn-save-methodology');
-    if (btn) btn.disabled = true;
-
-    try {
-      const res = await fetch('/api/benchmark/methodology', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(chain)
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to save methodology');
-
-      this.state.methodology = data.chain;
-      this.renderMethodology();
-      this.showToast('Test methodology chain saved and applied!', 'success');
-    } catch (e) {
-      console.error('Failed to save methodology', e);
-      this.showToast(e.message || 'Error saving methodology', 'error');
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-  }
 };
 
 document.addEventListener('DOMContentLoaded', () => {

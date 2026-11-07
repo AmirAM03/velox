@@ -42,10 +42,11 @@ Then browse to `http://127.0.0.1:18080`.
 ## 3. Set it up
 
 1. **Sources** tab: add subscription URLs. Velox fetches them right away and then on the schedule (default every 6 hours), deduplicates every config and drops configs that no subscription has listed for 7 days.
-2. **Profiles** tab: add one profile per target service:
-   - **Target service URL**: what nodes are ranked against, e.g. `https://www.youtube.com/generate_204`.
-   - **Port**: the public port users connect to, e.g. `20001`.
-   - **Username / Password**: required; every profile port is reachable from the internet.
+   If the server cannot reach a subscription (blocked or throttled), paste its content (URI lines or the base64 body) into **Paste configs** instead; it goes through the same parsing and deduplication.
+2. **Profiles** tab: the built-in profiles are already there, disabled. Press **Edit** on one:
+   - **Port**, **Username / Password**: required; every profile port is reachable from the internet.
+   - The type's settings. For **Antigravity**: paste agy's OAuth client secret (`GOCSPX-…`), then press **Sign in with Google** and sign in with the Google account to use; you come back to the dashboard signed in. (Alternative: paste the whole `~/.gemini/antigravity-cli/antigravity-oauth-token` file of a logged-in agy as the session.) Secrets are stored in `velox.db` and never shown again; leave a secret empty to keep it.
+   - Tick **Enabled** and save.
 3. Open each profile port in the firewall:
    ```bash
    sudo ufw allow 20001/tcp
@@ -55,7 +56,7 @@ Then browse to `http://127.0.0.1:18080`.
    socks5://user:pass@SERVER_IP:20001
    ```
 
-Every test cycle (default 30 minutes) re-ranks the nodes of each profile. The schedule can be changed in the Profiles tab; **Re-test now** and **Fetch all now** run a cycle immediately.
+Every test cycle (default 30 minutes) re-ranks the nodes of each profile that has **Auto** re-test on. Turn **Auto** off to pin a profile to its current nodes; its **Test now** button runs the same test for that profile alone whenever you press it. **Re-test all now** tests every enabled profile, and **Fetch all now** fetches subscriptions, then re-tests the Auto profiles. The schedule can be changed in the Profiles tab.
 
 ---
 

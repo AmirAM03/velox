@@ -106,14 +106,6 @@ func (e *XrayEngine) Dial(ctx context.Context, cfg *model.ProxyConfig, network, 
 	return core.Dial(ctx, inst, dest)
 }
 
-// TestTLSHandshake tests TLS/REALITY configuration and handshake through the proxy.
-func (e *XrayEngine) TestTLSHandshake(ctx context.Context, cfg *model.ProxyConfig) error {
-	// Verify that the REALITY/TLS config is structurally and cryptographically valid
-	// and that an Xray core instance can be created and started for it.
-	_, err := e.getInstance(cfg)
-	return err
-}
-
 // Close closes all running Xray instances.
 func (e *XrayEngine) Close() error {
 	e.mu.Lock()

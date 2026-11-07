@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -48,18 +47,16 @@ func FetchSubscription(url string, timeout time.Duration) (string, error) {
 		return "", fmt.Errorf("read body: %w", err)
 	}
 
-	raw := string(body)
+	return DecodeSubscription(string(body)), nil
+}
 
-	// Try to base64-decode the entire response (common for V2Ray subscriptions).
-	// If decoding succeeds and the result looks like config lines, use it.
-	if decoded, err := tryBase64Decode(raw); err == nil {
-		if looksLikeConfigs(decoded) {
-			slog.Debug("subscription response was base64-encoded", "url", url)
-			return decoded, nil
-		}
+// DecodeSubscription returns the config lines of a subscription body. Bodies that
+// are one base64 blob (the common V2Ray format) are decoded; plain lists pass through.
+func DecodeSubscription(raw string) string {
+	if decoded, err := tryBase64Decode(raw); err == nil && looksLikeConfigs(decoded) {
+		return decoded
 	}
-
-	return raw, nil
+	return raw
 }
 
 // CleanRawContent preprocesses raw config text:

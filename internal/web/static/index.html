@@ -26,15 +26,13 @@
         <button class="nav-btn" data-tab="profiles">Profiles</button>
         <button class="nav-btn" data-tab="sources">Sources</button>
         <button class="nav-btn" data-tab="configs">Configs</button>
-        <button class="nav-btn" data-tab="benchmark">Benchmark</button>
         <button class="nav-btn" data-tab="logs">Application Logs</button>
-        <button class="nav-btn" data-tab="tools">Database Tools</button>
       </nav>
 
       <div class="nav-status-group">
         <div id="optimizer-status-pill" class="status-pill idle">
           <span class="status-dot"></span>
-          <span id="optimizer-status-text">Optimizer: Idle</span>
+          <span id="optimizer-status-text">Velox: Idle</span>
         </div>
       </div>
     </header>
@@ -80,20 +78,11 @@
           </div>
 
           <div class="stat-card">
-            <div class="stat-icon-wrap purple">📊</div>
-            <div class="stat-data">
-              <span class="stat-label">Benchmark Status</span>
-              <span id="stat-tested-count" class="stat-value">0 Tested</span>
-              <span id="stat-avg-latency" class="stat-tag">Avg: — ms</span>
-            </div>
-          </div>
-
-          <div class="stat-card">
             <div class="stat-icon-wrap amber">🧭</div>
             <div class="stat-data">
               <span class="stat-label">Optimizer</span>
               <span id="stat-optimizer-phase" class="stat-value text-sm">Idle</span>
-              <span class="stat-tag">Fetches, tests and assigns nodes</span>
+              <span class="stat-tag">Fetches, benchmarks and assigns nodes</span>
             </div>
           </div>
 
@@ -109,30 +98,6 @@
           <div id="protocol-badges" class="proto-chips-container"></div>
         </div>
 
-        <!-- Top Ranked Nodes Table -->
-        <div class="glass-card">
-          <div class="card-header">
-            <h3 class="card-title">Top Ranked Nodes</h3>
-            <button class="btn btn-secondary btn-sm" onclick="app.switchTab('configs')">View All →</button>
-          </div>
-          <div class="table-responsive">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Proto</th>
-                  <th>Name</th>
-                  <th>Server</th>
-                  <th>Score</th>
-                  <th>Latency</th>
-                </tr>
-              </thead>
-              <tbody id="top-nodes-tbody">
-                <tr><td colspan="6" class="text-muted text-center py-4">Loading top nodes...</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
       </section>
 
       <!-- 2. CONFIGS EXPLORER VIEW -->
@@ -154,20 +119,15 @@
               <button class="filter-pill" data-proto="trojan">Trojan</button>
               <button class="filter-pill" data-proto="shadowsocks">Shadowsocks</button>
               <button class="filter-pill" data-proto="vmess">VMess</button>
-              <button class="filter-pill working-filter-pill" id="btn-toggle-working-filter" data-working="false">
-                <span class="status-dot-sm"></span> Working Only
-              </button>
             </div>
 
             <div class="filter-actions-right">
               <div class="sort-control">
                 <label for="configs-sort-select" class="text-xs text-muted">Sort:</label>
                 <select id="configs-sort-select" class="form-select select-sm">
-                  <option value="score">Score (Best First)</option>
-                  <option value="latency">Latency (Lowest First)</option>
+                  <option value="updated">Recently Listed</option>
                   <option value="name">Name (A-Z)</option>
                   <option value="protocol">Protocol</option>
-                  <option value="updated">Recently Tested</option>
                 </select>
               </div>
 
@@ -184,18 +144,17 @@
             <table class="data-table">
               <thead>
                 <tr>
-                  <th style="width: 48px;">Rank</th>
+                  <th style="width: 48px;">#</th>
                   <th style="width: 95px;">Protocol</th>
                   <th>Remark / Name</th>
                   <th>Address & Port</th>
                   <th style="width: 110px;">Transport</th>
-                  <th style="width: 90px;">Latency</th>
-                  <th style="width: 90px;">Score</th>
+                  <th style="width: 150px;">Last Listed</th>
                   <th style="width: 90px;">Actions</th>
                 </tr>
               </thead>
               <tbody id="all-configs-tbody">
-                <tr><td colspan="8" class="text-muted text-center py-4">Loading configurations...</td></tr>
+                <tr><td colspan="7" class="text-muted text-center py-4">Loading configurations...</td></tr>
               </tbody>
             </table>
           </div>
@@ -214,114 +173,72 @@
         <div class="dashboard-header">
           <div>
             <h1 class="page-title">Profiles</h1>
-            <p class="page-subtitle">Each profile is a public SOCKS5/HTTP port that routes through the best node for its target service</p>
+            <p class="page-subtitle">One card per service. Each runs its own test over all configs, keeps the configs that pass as candidates and serves the best one on its own SOCKS5/HTTP port</p>
           </div>
           <div class="actions-group">
-            <button id="btn-run-cycle" class="btn btn-secondary"><span class="icon">↻</span> Re-test now</button>
+            <button id="btn-optimizer" class="btn btn-secondary" title="Product-wide subscription options and background status"><span class="icon">⚙</span> General Options</button>
           </div>
         </div>
 
-        <div class="two-col-grid mb-4">
-          <div class="glass-card">
-            <h3 class="card-title mb-3" id="profile-form-title">New Profile</h3>
-            <input type="hidden" id="profile-id">
-            <div class="form-group mb-3">
-              <label class="form-label" for="profile-name">Name</label>
-              <input type="text" id="profile-name" class="form-input" placeholder="YouTube">
+        <div id="profile-cards" class="profile-cards mb-4">
+          <div class="glass-card text-muted">Loading profiles...</div>
+        </div>
+
+        <dialog id="optimizer-dialog" class="modal">
+          <div class="modal-card">
+            <div class="modal-head">
+              <div>
+                <h3 class="card-title">General Options</h3>
+                <p class="modal-sub">Product-wide subscription settings. Each profile's own testing is scheduled on its card, not here.</p>
+              </div>
+              <button class="modal-close js-opt-close" aria-label="Close">&times;</button>
             </div>
-            <div class="form-group mb-3">
-              <label class="form-label" for="profile-target">Target service URL</label>
-              <input type="url" id="profile-target" class="form-input" placeholder="https://www.youtube.com/generate_204">
-              <span class="text-muted text-xs mt-1">Nodes are ranked by how fast they load this URL.</span>
-            </div>
-            <div class="form-group mb-3">
-              <label class="form-label" for="profile-port">Port on this server</label>
-              <input type="number" id="profile-port" class="form-input" min="1" max="65535" placeholder="20001">
-            </div>
-            <div class="form-group mb-3">
-              <label class="form-label" for="profile-username">Username</label>
-              <input type="text" id="profile-username" class="form-input" autocomplete="off">
-            </div>
-            <div class="form-group mb-3">
-              <label class="form-label" for="profile-password">Password</label>
-              <div class="input-group">
-                <input type="text" id="profile-password" class="form-input" autocomplete="off">
-                <button id="btn-gen-password" class="btn btn-secondary" type="button">Generate</button>
+
+            <p class="opt-intro text-sm">These options control how Velox keeps your pool of configs fresh: how often it downloads your subscriptions and how long it keeps configs that fall out of them. Benchmarking a profile and choosing its live node is done per profile — open a profile card and use <strong>Test now</strong> or its <strong>Automated testing</strong> section.</p>
+
+            <div class="modal-section">
+              <div class="modal-section-title">Status</div>
+              <p class="text-xs text-muted mb-2">Live and read-only. While the state is anything but Idle a run is in progress, and a new run cannot be started until it finishes.</p>
+              <div class="info-list text-sm">
+                <div class="info-row"><span class="text-muted">State</span><span id="opt-phase">—</span></div>
+                <div class="info-row"><span class="text-muted">Last subscription fetch</span><span id="opt-last-refresh">—</span></div>
+                <div class="info-row"><span class="text-muted">Next subscription fetch</span><span id="opt-next-refresh">—</span></div>
+                <div class="info-row"><span class="text-muted">Last result</span><span id="opt-summary" class="text-xs">—</span></div>
               </div>
             </div>
-            <div class="form-group mb-3">
-              <label class="form-label"><input type="checkbox" id="profile-enabled" checked> Enabled</label>
-            </div>
-            <div style="display: flex; gap: 0.5rem;">
-              <button id="btn-save-profile" class="btn btn-primary">Save Profile</button>
-              <button id="btn-reset-profile" class="btn btn-secondary" type="button">Clear</button>
-            </div>
-          </div>
 
-          <div class="glass-card">
-            <h3 class="card-title mb-3">Optimizer</h3>
-            <div class="info-list text-sm mb-4">
-              <div class="info-row"><span class="text-muted">Status:</span><span id="opt-phase">—</span></div>
-              <div class="info-row"><span class="text-muted">Last test cycle:</span><span id="opt-last-cycle">—</span></div>
-              <div class="info-row"><span class="text-muted">Next test cycle:</span><span id="opt-next-cycle">—</span></div>
-              <div class="info-row"><span class="text-muted">Last subscription fetch:</span><span id="opt-last-refresh">—</span></div>
-              <div class="info-row"><span class="text-muted">Next subscription fetch:</span><span id="opt-next-refresh">—</span></div>
-              <div class="info-row"><span class="text-muted">Last result:</span><span id="opt-summary" class="text-xs">—</span></div>
+            <div class="modal-section">
+              <div class="modal-section-title">Subscriptions</div>
+              <div class="form-group mb-3">
+                <label class="form-label" for="opt-refresh-interval">Fetch subscriptions every</label>
+                <select id="opt-refresh-interval" class="form-select">
+                  <option value="1h">1 hour</option>
+                  <option value="3h">3 hours</option>
+                  <option value="6h">6 hours</option>
+                  <option value="12h">12 hours</option>
+                  <option value="24h">24 hours</option>
+                </select>
+                <span class="text-muted text-xs">How often Velox downloads your subscription URLs, then parses and de-duplicates the configs into the shared pool every profile tests against. Does not test any profile — that happens on each profile's own schedule.</span>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="opt-max-age">Drop configs no subscription has listed for</label>
+                <select id="opt-max-age" class="form-select">
+                  <option value="1d">1 day</option>
+                  <option value="3d">3 days</option>
+                  <option value="7d">7 days</option>
+                  <option value="14d">14 days</option>
+                  <option value="30d">30 days</option>
+                </select>
+                <span class="text-muted text-xs">A config that has been missing from every subscription for this long is deleted. Nodes a profile is currently serving are always kept. Shorter keeps the list lean; longer tolerates subscriptions that drop nodes temporarily.</span>
+              </div>
             </div>
-            <div class="form-group mb-3">
-              <label class="form-label" for="opt-cycle-interval">Re-test profiles every</label>
-              <select id="opt-cycle-interval" class="form-select">
-                <option value="5m">5 minutes</option>
-                <option value="15m">15 minutes</option>
-                <option value="30m">30 minutes</option>
-                <option value="1h">1 hour</option>
-                <option value="3h">3 hours</option>
-              </select>
-            </div>
-            <div class="form-group mb-3">
-              <label class="form-label" for="opt-refresh-interval">Fetch subscriptions every</label>
-              <select id="opt-refresh-interval" class="form-select">
-                <option value="1h">1 hour</option>
-                <option value="3h">3 hours</option>
-                <option value="6h">6 hours</option>
-                <option value="12h">12 hours</option>
-                <option value="24h">24 hours</option>
-              </select>
-            </div>
-            <div class="form-group mb-3">
-              <label class="form-label" for="opt-max-age">Drop configs no subscription has listed for</label>
-              <select id="opt-max-age" class="form-select">
-                <option value="1d">1 day</option>
-                <option value="3d">3 days</option>
-                <option value="7d">7 days</option>
-                <option value="14d">14 days</option>
-                <option value="30d">30 days</option>
-              </select>
-            </div>
-            <button id="btn-save-schedule" class="btn btn-primary">Save Schedule</button>
-          </div>
-        </div>
 
-        <div class="glass-card">
-          <div class="table-responsive">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th style="width: 80px;">Port</th>
-                  <th>Target</th>
-                  <th style="width: 130px;">Status</th>
-                  <th>Active Node</th>
-                  <th style="width: 90px;">Best</th>
-                  <th style="width: 280px;">Actions</th>
-                </tr>
-              </thead>
-              <tbody id="profiles-tbody">
-                <tr><td colspan="7" class="text-muted text-center py-4">Loading profiles...</td></tr>
-              </tbody>
-            </table>
+            <div class="modal-actions">
+              <button class="btn btn-secondary js-opt-close">Close</button>
+              <button id="btn-save-schedule" class="btn btn-primary">Save schedule</button>
+            </div>
           </div>
-        </div>
+        </dialog>
       </section>
 
       <!-- SOURCES VIEW -->
@@ -345,6 +262,16 @@
           <span class="text-muted text-xs mt-1">Base64 subscriptions and plain URI lists (vless, vmess, trojan, ss, hysteria2) are supported.</span>
         </div>
 
+        <div class="glass-card mb-4">
+          <label class="form-label" for="source-paste-input">Paste configs</label>
+          <textarea id="source-paste-input" class="form-textarea text-mono text-xs" rows="6"
+            placeholder="vless://...&#10;trojan://...&#10;or a whole base64 subscription body"></textarea>
+          <div style="display: flex; gap: 0.75rem; align-items: center; margin-top: 0.5rem;">
+            <button id="btn-paste-source" class="btn btn-primary">Import</button>
+            <span class="text-muted text-xs">For when the server cannot reach a subscription. Imported configs are deduplicated with all others and expire after the config max age unless a profile uses them.</span>
+          </div>
+        </div>
+
         <div class="glass-card">
           <div class="table-responsive">
             <table class="data-table">
@@ -366,247 +293,7 @@
         </div>
       </section>
 
-      <!-- 4. BENCHMARK VIEW -->
-      <section id="tab-benchmark" class="tab-pane">
-        <div class="glass-card benchmark-master-card">
-          <!-- Master Header -->
-          <div class="benchmark-master-header">
-            <div>
-              <div class="flex-align gap-2">
-                <h1 class="page-title mb-0">Speed & Latency Benchmark</h1>
-                <span id="benchmark-header-status" class="status-pill idle">
-                  <span class="status-dot"></span>
-                  <span id="benchmark-header-text">Ready</span>
-                </span>
-                <span class="badge badge-cyan" id="methodology-steps-count">3 Steps Active</span>
-              </div>
-              <p class="page-subtitle text-xs mt-1">High-performance parallel testing with real-time telemetry streaming</p>
-            </div>
-
-            <div class="benchmark-header-actions">
-              <button id="btn-toggle-benchmark-settings" class="btn btn-secondary btn-sm" onclick="app.toggleBenchmarkSettings()">
-                <span>⚙️ Methodology & Settings</span>
-                <span id="benchmark-settings-chevron">▼</span>
-              </button>
-              <button id="btn-start-benchmark" class="btn btn-primary">⚡ Start Parallel Benchmark</button>
-              <button id="btn-cancel-benchmark" class="btn btn-danger hidden">🛑 Cancel Benchmark</button>
-            </div>
-          </div>
-
-          <!-- Quick Parameters Toolbar (Single Source of Truth, No Duplicates) -->
-          <div class="benchmark-quick-toolbar">
-            <!-- Target URL & Presets -->
-            <div class="toolbar-item target-url-item">
-              <div class="toolbar-label-row">
-                <label class="text-xs font-bold text-muted" for="benchmark-target-input">Target URL (Delay Endpoint):</label>
-                <div class="target-presets inline-presets" id="benchmark-presets-container">
-                  <button type="button" class="btn btn-xs btn-secondary preset-btn active" data-url="https://www.google.com/generate_204" title="Google fast 204 connectivity test">🌐 Google (204)</button>
-                  <button type="button" class="btn btn-xs btn-secondary preset-btn" data-url="https://www.google.com" title="Google Search main page">🔍 Google Web</button>
-                  <button type="button" class="btn btn-xs btn-secondary preset-btn" data-url="https://cp.cloudflare.com/generate_204" title="Cloudflare edge 204">⚡ Cloudflare (204)</button>
-                  <button type="button" class="btn btn-xs btn-secondary preset-btn" data-url="https://www.cloudflare.com/cdn-cgi/trace" title="Cloudflare trace">☁️ CF Trace</button>
-                  <button type="button" class="btn btn-xs btn-secondary preset-btn" data-url="https://www.youtube.com/generate_204" title="YouTube video CDN">📺 YouTube</button>
-                  <button type="button" class="btn btn-xs btn-secondary preset-btn" data-url="https://github.com" title="GitHub">🐙 GitHub</button>
-                </div>
-              </div>
-              <input type="url" id="benchmark-target-input" class="form-input input-sm mt-1" value="https://www.google.com/generate_204" placeholder="https://www.google.com/generate_204">
-            </div>
-
-            <!-- Scope & Protocol Filters -->
-            <div class="toolbar-item scope-proto-item">
-              <div class="form-row gap-2">
-                <div style="flex: 1;">
-                  <label class="text-xs font-bold text-muted" for="benchmark-scope-select">Scope:</label>
-                  <select id="benchmark-scope-select" class="form-select select-sm mt-1 w-full">
-                    <option value="all">All Configurations</option>
-                    <option value="untested">Untested Nodes Only</option>
-                    <option value="top100">Top 100 Stored Nodes</option>
-                    <option value="top500">Top 500 Stored Nodes</option>
-                  </select>
-                </div>
-                <div style="flex: 1;">
-                  <label class="text-xs font-bold text-muted" for="benchmark-proto-select">Protocol:</label>
-                  <select id="benchmark-proto-select" class="form-select select-sm mt-1 w-full">
-                    <option value="">All Protocols</option>
-                    <option value="vless">VLESS</option>
-                    <option value="trojan">Trojan</option>
-                    <option value="vmess">VMess</option>
-                    <option value="shadowsocks">Shadowsocks</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            <!-- Parallel Threads -->
-            <div class="toolbar-item threads-item">
-              <div class="flex-between">
-                <label class="text-xs font-bold text-muted" for="benchmark-threads-input">Parallel Threads:</label>
-                <span id="threads-indicator-label" class="text-xs font-mono text-cyan">100 Threads</span>
-              </div>
-              <div class="input-with-chips mt-1">
-                <div class="thread-chips-group inline-thread-chips">
-                  <button type="button" class="chip-btn chip-xs" data-threads="50">50</button>
-                  <button type="button" class="chip-btn chip-xs active" data-threads="100">100</button>
-                  <button type="button" class="chip-btn chip-xs" data-threads="200">200</button>
-                  <button type="button" class="chip-btn chip-xs" data-threads="500">500</button>
-                </div>
-                <input type="number" id="benchmark-threads-input" class="form-input input-sm thread-num-input" value="100" min="1" max="1000">
-              </div>
-            </div>
-          </div>
-
-          <!-- Managed Settings & Pipeline Methodology Section (Collapsible Accordion / Drawer) -->
-          <div id="benchmark-settings-panel" class="benchmark-settings-drawer hidden">
-            <div class="settings-drawer-inner">
-              <div class="settings-drawer-header">
-                <div>
-                  <h3 class="card-title text-base">Pipeline Methodology & Scoring Strategy</h3>
-                  <p class="text-muted text-xs mt-1">Configure test stages, execution sequence, timeouts, necessity filters, and normalized scoring</p>
-                </div>
-                <div class="actions-group flex-wrap">
-                  <div class="preset-pill-group">
-                    <span class="text-xs text-muted mr-1">Presets:</span>
-                    <button type="button" class="btn btn-secondary btn-xs" onclick="app.applyMethodologyPreset('standard')">Standard (3-Stage)</button>
-                    <button type="button" class="btn btn-secondary btn-xs" onclick="app.applyMethodologyPreset('url_only')">Direct URL Only</button>
-                    <button type="button" class="btn btn-secondary btn-xs" onclick="app.applyMethodologyPreset('tcp_only')">TCP Ping Only</button>
-                    <button type="button" class="btn btn-secondary btn-xs" onclick="app.applyMethodologyPreset('deep')">Deep Verification</button>
-                  </div>
-                  <button id="btn-add-methodology-step" class="btn btn-secondary btn-xs" onclick="app.openAddStepModal()">
-                    <span>+ Add Step</span>
-                  </button>
-                  <button id="btn-save-methodology" class="btn btn-primary btn-xs" onclick="app.saveMethodology()">
-                    <span>💾 Save Methodology</span>
-                  </button>
-                </div>
-              </div>
-
-              <!-- Methodology Bar -->
-              <div class="methodology-bar mt-2 mb-3">
-                <div class="methodology-setting-item">
-                  <label class="text-xs text-muted font-bold" for="methodology-scoring-mode">Score Mode:</label>
-                  <select id="methodology-scoring-mode" class="form-select select-sm" onchange="app.onScoringModeChange(this.value)">
-                    <option value="primary_test">Primary Test Latency (Hard-filtered by Necessary tests)</option>
-                    <option value="weighted_average">Weighted Average (Blend latency across stages by weights)</option>
-                  </select>
-                </div>
-                <div class="methodology-info-note text-xs text-muted">
-                  <span>💡 <strong>Necessary Filter:</strong> If marked Necessary fails on a node, that node is immediately disqualified and skips subsequent stages.</span>
-                </div>
-              </div>
-
-              <!-- Dynamic Steps Chain -->
-              <div id="methodology-steps-container" class="methodology-chain-list">
-                <!-- Dynamically populated step cards -->
-              </div>
-            </div>
-          </div>
-
-          <!-- Live Progress & Stage Banner -->
-          <div class="benchmark-progress-section mt-3">
-            <div class="progress-header-row mb-2">
-              <div class="flex-align gap-2">
-                <span class="font-bold text-sm">Testing Progress:</span>
-                <span id="benchmark-stage-label" class="text-xs text-cyan font-mono">Ready to test</span>
-              </div>
-              <div class="flex-align gap-2">
-                <span id="benchmark-progress-pct" class="text-xs font-mono font-bold text-emerald">0%</span>
-                <span id="benchmark-progress-counts" class="text-xs text-muted font-mono">(0 / 0 nodes)</span>
-              </div>
-            </div>
-
-            <div class="progress-bar-track">
-              <div id="benchmark-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
-            </div>
-          </div>
-
-          <!-- Live Telemetry KPI Metrics Strip -->
-          <div class="live-stats-row my-3">
-            <div class="live-stat-pill">
-              <span class="pill-label">Total</span>
-              <span id="stat-live-total" class="pill-val">0</span>
-            </div>
-            <div class="live-stat-pill">
-              <span class="pill-label">Tested</span>
-              <span id="stat-live-tested" class="pill-val">0</span>
-            </div>
-            <div class="live-stat-pill success">
-              <span class="pill-label">Working</span>
-              <span id="stat-live-passed" class="pill-val">0</span>
-            </div>
-            <div class="live-stat-pill danger">
-              <span class="pill-label">Failed</span>
-              <span id="stat-live-failed" class="pill-val">0</span>
-            </div>
-            <div class="live-stat-pill cyan">
-              <span class="pill-label">Fastest Latency</span>
-              <span id="stat-live-fastest" class="pill-val">— ms</span>
-            </div>
-          </div>
-
-          <!-- Full-Width Live Streaming Results Table -->
-          <div class="table-responsive live-table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th style="width: 80px;">Status</th>
-                  <th style="width: 85px;">Proto</th>
-                  <th>Node Remark / Name</th>
-                  <th>Endpoint</th>
-                  <th style="width: 95px;">Latency</th>
-                  <th>Stage / Verification Outcome</th>
-                </tr>
-              </thead>
-              <tbody id="benchmark-live-tbody">
-                <tr>
-                  <td colspan="7" class="text-muted text-center py-5">
-                    <div class="empty-icon text-2xl mb-1">⏱️</div>
-                    No benchmark running. Click "Start Parallel Benchmark" to watch live streaming node tests.
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      <!-- 5. DATABASE TOOLS VIEW -->
-      <section id="tab-tools" class="tab-pane">
-        <div class="dashboard-header">
-          <div>
-            <h1 class="page-title">Database & Maintenance</h1>
-            <p class="page-subtitle">Inspect storage health, remove redundant duplicates, and optimize performance</p>
-          </div>
-        </div>
-
-        <div class="stats-grid mb-4">
-          <div class="glass-card">
-            <h3 class="card-title mb-2">Zero-Duplication Enforcer</h3>
-            <p class="text-muted text-sm mb-4">
-              Re-scans every entry in the database against the canonical SHA-256 identity hash and cleans up any redundant records.
-            </p>
-            <button id="btn-run-dedup" class="btn btn-primary">Run Database Deduplication</button>
-          </div>
-
-          <div class="glass-card">
-            <h3 class="card-title mb-2">Database Information</h3>
-            <div class="info-list text-sm">
-              <div class="info-row">
-                <span class="text-muted">Storage Engine:</span>
-                <span class="text-mono">SQLite WAL Mode</span>
-              </div>
-              <div class="info-row">
-                <span class="text-muted">Database Path:</span>
-                <span id="db-path-display" class="text-mono text-xs">Loading...</span>
-              </div>
-              <div class="info-row">
-                <span class="text-muted">Profile Listen Address:</span>
-                <span id="listen-addr-display" class="text-mono">—</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- 6. IN-DEPTH APPLICATION LOGS VIEW -->
+      <!-- APPLICATION LOGS VIEW -->
       <section id="tab-logs" class="tab-pane">
         <div class="dashboard-header">
           <div>
@@ -691,13 +378,12 @@
               <select id="logs-source-select" class="form-input text-xs" style="padding: 0.35rem 0.6rem;">
                 <option value="all">All Subsystems</option>
                 <option value="engine">Engine</option>
-                <option value="pipeline">Pipeline</option>
                 <option value="optimizer">Optimizer</option>
                 <option value="profiles">Profiles</option>
+                <option value="proxy">Proxy</option>
                 <option value="storage">Storage</option>
                 <option value="web">Web Server</option>
                 <option value="system">System</option>
-                <option value="dedup">Deduplication</option>
               </select>
             </div>
 
@@ -740,64 +426,6 @@
           </div>
         </div>
       </section>
-
-  <!-- Modal: Add Methodology Step -->
-  <div id="modal-add-step" class="modal-overlay hidden">
-    <div class="modal-content glass-card">
-      <div class="modal-header">
-        <h3 class="modal-title">Add Methodology Test Step</h3>
-        <button class="modal-close-btn" onclick="app.closeAddStepModal()">✕</button>
-      </div>
-      <div class="modal-body">
-        <div class="form-group mb-3">
-          <label class="form-label">Step Test Type</label>
-          <div class="step-type-selector">
-            <label class="step-type-card active">
-              <input type="radio" name="new-step-type" value="tcp_ping" checked onchange="app.onNewStepTypeChange(this.value)">
-              <div class="step-type-title">TCP Port Ping</div>
-              <div class="step-type-desc">Fast TCP handshake to check host & port reachability</div>
-            </label>
-            <label class="step-type-card">
-              <input type="radio" name="new-step-type" value="tls_handshake" onchange="app.onNewStepTypeChange(this.value)">
-              <div class="step-type-title">TLS / REALITY Handshake</div>
-              <div class="step-type-desc">Cryptographic handshake with SNI and certificate validation</div>
-            </label>
-            <label class="step-type-card">
-              <input type="radio" name="new-step-type" value="http_delay" onchange="app.onNewStepTypeChange(this.value)">
-              <div class="step-type-title">HTTP Delay Toward URL</div>
-              <div class="step-type-desc">Full proxy round-trip measuring real TTFB toward destination URL</div>
-            </label>
-          </div>
-        </div>
-
-        <div class="form-group mb-3">
-          <label class="form-label" for="new-step-name">Step Name</label>
-          <input type="text" id="new-step-name" class="form-input" placeholder="e.g. TCP Ping">
-        </div>
-
-        <div class="form-group mb-3">
-          <label class="form-label" for="new-step-timeout">Timeout (ms)</label>
-          <input type="number" id="new-step-timeout" class="form-input" value="3000" min="500" max="30000" step="100">
-        </div>
-
-        <div class="form-group mb-3" id="new-step-target-wrap" style="display: none;">
-          <label class="form-label" for="new-step-target">Target URL (for HTTP Delay)</label>
-          <input type="url" id="new-step-target" class="form-input" value="https://www.google.com/generate_204" placeholder="https://www.google.com/generate_204">
-        </div>
-
-        <div class="form-group mb-3">
-          <label class="checkbox-label">
-            <input type="checkbox" id="new-step-necessary" checked>
-            <span><strong>Necessary (Hard Filter):</strong> Disqualify node immediately if this test fails</span>
-          </label>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary btn-sm" onclick="app.closeAddStepModal()">Cancel</button>
-        <button class="btn btn-primary btn-sm" onclick="app.confirmAddStep()">+ Add Step to Chain</button>
-      </div>
-    </div>
-  </div>
 
     </main>
   </div>

@@ -12,9 +12,12 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/xtls/xray-core/core"
 
+	"github.com/AmirAM03/velox/internal/bench"
+	"github.com/AmirAM03/velox/internal/checks"
 	"github.com/AmirAM03/velox/internal/model"
 	"github.com/AmirAM03/velox/internal/parser"
 	"github.com/AmirAM03/velox/internal/proxy"
@@ -60,7 +63,7 @@ func TestE2E_ProfileThroughRealXray(t *testing.T) {
 	pm := NewProfileManager(nil, "127.0.0.1", 3, slog.Default())
 	defer pm.Close()
 	profilePort := freePort(t)
-	sel := proxy.NewSelector(nil, 0, 3, slog.Default())
+	sel := proxy.NewSelector(3, slog.Default())
 	sel.SetPool([]*model.ProxyConfig{node})
 	srv := proxy.NewServer("127.0.0.1", profilePort, "u", "p", pm.engine, sel, slog.Default())
 	if err := srv.Start(); err != nil {
@@ -128,8 +131,14 @@ func TestE2E_OptimizerAssignsWorkingNode(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Two test profile types that check the local target, like a real type checks its service.
+	newCheck := func(map[string]string) (bench.Check, error) { return urlCheck(target.URL), nil }
+	saved := checks.Kinds
+	checks.Kinds = append(checks.Kinds, checks.Kind{ID: "local", Name: "local", New: newCheck}, checks.Kind{ID: "manual", Name: "manual", New: newCheck})
+	defer func() { checks.Kinds = saved }()
+
 	profilePort := freePort(t)
-	id, err := store.SaveProfile(storage.Profile{Name: "local", TargetURL: target.URL, Port: profilePort, Username: "u", Password: "p", Enabled: true})
+	id, err := store.SaveProfile(storage.Profile{Kind: "local", Name: "local", Port: profilePort, Username: "u", Password: "p", Enabled: true, AutoTest: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,10 +146,32 @@ func TestE2E_OptimizerAssignsWorkingNode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary := srv.optimizer.cycle(context.Background())
-	nodes, _, _ := store.ListProfileNodes(id)
+	manualID, err := store.SaveProfile(storage.Profile{Kind: "manual", Name: "manual", Port: freePort(t), Username: "u", Password: "p", Enabled: true, AutoTest: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.profiles.Sync(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A scheduled cycle tests auto-test profiles only.
+	scheduled := func(p storage.Profile) bool { return p.AutoTest }
+	summary := srv.optimizer.cycle(context.Background(), scheduled)
+	nodes, _, _ := store.ListProfileNodes(id, false)
 	if len(nodes) != 1 || nodes[0].ConfigID != live.ID {
 		t.Fatalf("profile nodes = %+v (summary %q), want only the live node", nodes, summary)
+	}
+	if st := LoadProfileStats(store, id); st == nil || st.Configs != 2 || st.Reachable != 1 || st.Reached != 1 || st.Checked != 1 || st.Passed != 1 || st.Passing["local"] != 1 {
+		t.Fatalf("profile stats = %+v, want the funnel 2 configs, 1 reachable, 1 reached, 1 checked, 1 passed", st)
+	}
+	if manual, _, _ := store.ListProfileNodes(manualID, false); len(manual) != 0 {
+		t.Fatalf("scheduled cycle tested an auto-test-off profile: %+v", manual)
+	}
+
+	// "Test now" on the manual profile runs the same flow for it alone.
+	srv.optimizer.cycle(context.Background(), func(p storage.Profile) bool { return p.ID == manualID })
+	if manual, _, _ := store.ListProfileNodes(manualID, false); len(manual) != 1 || manual[0].ConfigID != live.ID {
+		t.Fatalf("manual test nodes = %+v, want the live node", manual)
 	}
 
 	proxyURL, _ := url.Parse(fmt.Sprintf("http://u:p@127.0.0.1:%d", profilePort))
@@ -153,4 +184,28 @@ func TestE2E_OptimizerAssignsWorkingNode(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
+}
+
+// urlCheck is a minimal profile type: any answer from url passes the probe, a 200 passes the check.
+type urlCheck string
+
+func (u urlCheck) Probe(ctx context.Context, c *http.Client) error {
+	resp, err := c.Get(string(u))
+	if err == nil {
+		resp.Body.Close()
+	}
+	return err
+}
+
+func (u urlCheck) Verify(ctx context.Context, c *http.Client) bench.Verdict {
+	start := time.Now()
+	resp, err := c.Get(string(u))
+	if err != nil {
+		return bench.Verdict{Err: err.Error()}
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return bench.Verdict{Err: fmt.Sprintf("status %d", resp.StatusCode)}
+	}
+	return bench.Verdict{OK: true, Label: "local", Latency: time.Since(start)}
 }

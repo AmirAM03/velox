@@ -2,7 +2,6 @@ package engine
 
 import (
 	"bytes"
-	"context"
 	"testing"
 
 	"github.com/xtls/xray-core/core"
@@ -48,7 +47,7 @@ func TestCoreLoadConfig_VLESS(t *testing.T) {
 	eng := NewXrayEngine(nil)
 	defer eng.Close()
 
-	if err := eng.TestTLSHandshake(context.Background(), cfg); err != nil {
-		t.Fatalf("TestTLSHandshake failed: %v", err)
+	if _, err := eng.getInstance(cfg); err != nil {
+		t.Fatalf("engine instance failed: %v", err)
 	}
 }

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -18,22 +19,31 @@ type Source struct {
 	LastCount     int        `json:"last_count"`
 }
 
-// Profile is a public proxy port bound to one target service.
+// Profile is a public proxy port bound to one built-in profile type (checks.Kind).
 type Profile struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	TargetURL string `json:"target_url"`
-	Port      int    `json:"port"`
-	Username  string `json:"username"`
-	Password  string `json:"password"`
-	Enabled   bool   `json:"enabled"`
+	ID           int64             `json:"id"`
+	Kind         string            `json:"kind"`
+	Name         string            `json:"name"`
+	Port         int               `json:"port"`
+	Username     string            `json:"username"`
+	Password     string            `json:"password"`
+	Enabled      bool              `json:"enabled"`
+	AutoTest     bool              `json:"auto_test"`     // re-tested automatically on its own interval; off = only "Test now"
+	TestInterval string            `json:"test_interval"` // how often auto-test runs, e.g. "30m"
+	Settings     map[string]string `json:"settings"`      // the type's own fields, e.g. a session credential
 }
 
-// ProfileNode is one ranked config chosen for a profile by the last test cycle.
+// ProfileNode is one config the profile's real check looked at in the last test:
+// the passing ones are the profile's candidates, ranked best first (Rank 1..n);
+// the others keep their label and why they failed (Rank 0).
 type ProfileNode struct {
 	ConfigID  string    `json:"config_id"`
 	Rank      int       `json:"rank"`
-	LatencyMS float64   `json:"latency_ms"`
+	OK        bool      `json:"ok"`         // passed the check: a candidate the profile may serve
+	LatencyMS float64   `json:"latency_ms"` // response time of the check's deciding request
+	Label     string    `json:"label"`      // what the check saw, e.g. the country the service placed the node in
+	Error     string    `json:"error,omitempty"`
+	Response  string    `json:"response,omitempty"` // raw body of the check's deciding response
 	TestedAt  time.Time `json:"tested_at"`
 }
 
@@ -91,11 +101,11 @@ func (s *Store) RecordSourceFetch(id int64, count int, fetchErr error) error {
 }
 
 // PruneStaleConfigs deletes configs no source has listed since the cutoff,
-// except ones a profile is currently using.
+// except a profile's current candidates. Failed check results go with their config.
 func (s *Store) PruneStaleConfigs(olderThan time.Duration) (int64, error) {
 	res, err := s.db.Exec(`
 		DELETE FROM configs
-		WHERE updated_at < ? AND id NOT IN (SELECT config_id FROM profile_nodes)`,
+		WHERE updated_at < ? AND id NOT IN (SELECT config_id FROM profile_nodes WHERE ok = 1)`,
 		formatDBTime(time.Now().Add(-olderThan)))
 	if err != nil {
 		return 0, err
@@ -105,7 +115,7 @@ func (s *Store) PruneStaleConfigs(olderThan time.Duration) (int64, error) {
 
 // ListProfiles returns all profiles ordered by port.
 func (s *Store) ListProfiles() ([]Profile, error) {
-	rows, err := s.db.Query(`SELECT id, name, target_url, port, username, password, enabled FROM profiles ORDER BY port`)
+	rows, err := s.db.Query(`SELECT id, kind, name, port, username, password, enabled, auto_test, test_interval, settings FROM profiles ORDER BY port`)
 	if err != nil {
 		return nil, err
 	}
@@ -113,34 +123,42 @@ func (s *Store) ListProfiles() ([]Profile, error) {
 	out := []Profile{}
 	for rows.Next() {
 		var p Profile
-		if err := rows.Scan(&p.ID, &p.Name, &p.TargetURL, &p.Port, &p.Username, &p.Password, &p.Enabled); err != nil {
+		var settings string
+		if err := rows.Scan(&p.ID, &p.Kind, &p.Name, &p.Port, &p.Username, &p.Password, &p.Enabled, &p.AutoTest, &p.TestInterval, &settings); err != nil {
 			return nil, err
+		}
+		if err := json.Unmarshal([]byte(settings), &p.Settings); err != nil || p.Settings == nil {
+			p.Settings = map[string]string{}
 		}
 		out = append(out, p)
 	}
 	return out, rows.Err()
 }
 
-// SaveProfile inserts the profile when ID is 0, otherwise updates it. It returns the ID.
+// SaveProfile inserts the profile when ID is 0, otherwise updates it (its kind never
+// changes). It returns the ID.
 func (s *Store) SaveProfile(p Profile) (int64, error) {
+	settings, err := json.Marshal(p.Settings)
+	if err != nil || p.Settings == nil {
+		settings = []byte("{}")
+	}
+	ti := p.TestInterval
+	if ti == "" {
+		ti = "30m"
+	}
 	if p.ID == 0 {
-		res, err := s.db.Exec(`INSERT INTO profiles (name, target_url, port, username, password, enabled) VALUES (?, ?, ?, ?, ?, ?)`,
-			p.Name, p.TargetURL, p.Port, p.Username, p.Password, p.Enabled)
+		res, err := s.db.Exec(`INSERT INTO profiles (kind, name, port, username, password, enabled, auto_test, test_interval, settings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			p.Kind, p.Name, p.Port, p.Username, p.Password, p.Enabled, p.AutoTest, ti, string(settings))
 		if err != nil {
 			return 0, err
 		}
 		return res.LastInsertId()
 	}
-	return p.ID, s.execOne(`UPDATE profiles SET name = ?, target_url = ?, port = ?, username = ?, password = ?, enabled = ? WHERE id = ?`,
-		p.Name, p.TargetURL, p.Port, p.Username, p.Password, p.Enabled, p.ID)
+	return p.ID, s.execOne(`UPDATE profiles SET name = ?, port = ?, username = ?, password = ?, enabled = ?, auto_test = ?, test_interval = ?, settings = ? WHERE id = ?`,
+		p.Name, p.Port, p.Username, p.Password, p.Enabled, p.AutoTest, ti, string(settings), p.ID)
 }
 
-// DeleteProfile removes a profile and its ranked nodes.
-func (s *Store) DeleteProfile(id int64) error {
-	return s.execOne(`DELETE FROM profiles WHERE id = ?`, id)
-}
-
-// ReplaceProfileNodes swaps a profile's ranked nodes for a new set in one transaction.
+// ReplaceProfileNodes swaps a profile's check results for a new set in one transaction.
 func (s *Store) ReplaceProfileNodes(profileID int64, nodes []ProfileNode) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -151,19 +169,22 @@ func (s *Store) ReplaceProfileNodes(profileID int64, nodes []ProfileNode) error 
 		return err
 	}
 	for _, n := range nodes {
-		if _, err := tx.Exec(`INSERT INTO profile_nodes (profile_id, config_id, rank, latency_ms, tested_at) VALUES (?, ?, ?, ?, ?)`,
-			profileID, n.ConfigID, n.Rank, n.LatencyMS, formatDBTime(n.TestedAt)); err != nil {
+		if _, err := tx.Exec(`INSERT INTO profile_nodes (profile_id, config_id, rank, ok, latency_ms, note, error, response, tested_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			profileID, n.ConfigID, n.Rank, n.OK, n.LatencyMS, n.Label, n.Error, n.Response, formatDBTime(n.TestedAt)); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-// ListProfileNodes returns a profile's ranked nodes with their configs, best first.
-func (s *Store) ListProfileNodes(profileID int64) ([]ProfileNode, []*model.ProxyConfig, error) {
+// ListProfileNodes returns a profile's check results with their configs: the
+// candidates best first, then (unless candidatesOnly) the failed ones. Results whose
+// config is gone are left out.
+func (s *Store) ListProfileNodes(profileID int64, candidatesOnly bool) ([]ProfileNode, []*model.ProxyConfig, error) {
 	rows, err := s.db.Query(`
-		SELECT pn.config_id, pn.rank, pn.latency_ms, pn.tested_at
-		FROM profile_nodes pn WHERE pn.profile_id = ? ORDER BY pn.rank`, profileID)
+		SELECT pn.config_id, pn.rank, pn.ok, pn.latency_ms, pn.note, pn.error, pn.response, pn.tested_at
+		FROM profile_nodes pn WHERE pn.profile_id = ? AND (pn.ok = 1 OR ? = 0)
+		ORDER BY pn.ok DESC, pn.rank, pn.note`, profileID, candidatesOnly)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -172,7 +193,7 @@ func (s *Store) ListProfileNodes(profileID int64) ([]ProfileNode, []*model.Proxy
 	for rows.Next() {
 		var n ProfileNode
 		var tested string
-		if err := rows.Scan(&n.ConfigID, &n.Rank, &n.LatencyMS, &tested); err != nil {
+		if err := rows.Scan(&n.ConfigID, &n.Rank, &n.OK, &n.LatencyMS, &n.Label, &n.Error, &n.Response, &tested); err != nil {
 			rows.Close()
 			return nil, nil, err
 		}
@@ -194,13 +215,15 @@ func (s *Store) ListProfileNodes(profileID int64) ([]ProfileNode, []*model.Proxy
 	for _, c := range cfgs {
 		byID[c.ID] = c
 	}
+	keptNodes := nodes[:0]
 	ordered := make([]*model.ProxyConfig, 0, len(nodes))
 	for _, n := range nodes {
 		if c := byID[n.ConfigID]; c != nil {
+			keptNodes = append(keptNodes, n)
 			ordered = append(ordered, c)
 		}
 	}
-	return nodes, ordered, nil
+	return keptNodes, ordered, nil
 }
 
 // execOne runs a statement that must touch exactly one row.

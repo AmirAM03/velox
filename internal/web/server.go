@@ -14,20 +14,20 @@ import (
 
 	"github.com/AmirAM03/velox/internal/config"
 	loggerPkg "github.com/AmirAM03/velox/internal/logger"
-	"github.com/AmirAM03/velox/internal/model"
 	"github.com/AmirAM03/velox/internal/storage"
 )
 
 // Server manages the web dashboard HTTP server and background proxy state.
 type Server struct {
-	cfg         *config.Config
-	store       *storage.Store
-	logger      *slog.Logger
-	dbHandler   *loggerPkg.DBHandler
-	port        int
-	jobMgr      *BenchmarkJobManager
-	profiles    *ProfileManager
-	optimizer   *Optimizer
+	cfg       *config.Config
+	store     *storage.Store
+	logger    *slog.Logger
+	dbHandler *loggerPkg.DBHandler
+	port      int
+	hub       *Hub
+	profiles  *ProfileManager
+	optimizer *Optimizer
+	logins    logins
 }
 
 // NewServer creates a new web dashboard server.
@@ -39,11 +39,10 @@ func NewServer(cfg *config.Config, store *storage.Store, port int, logger *slog.
 		logger = slog.Default()
 	}
 
-	jobMgr := NewBenchmarkJobManager(store, &cfg.Pipeline, cfg.Scoring, logger)
-
+	hub := NewHub()
 	if dbHandler != nil {
 		dbHandler.AddBroadcast(func(rec *storage.LogRecord) {
-			jobMgr.BroadcastAppLog(rec)
+			hub.Broadcast(map[string]any{"type": "app_log", "log": rec})
 		})
 	}
 
@@ -53,11 +52,11 @@ func NewServer(cfg *config.Config, store *storage.Store, port int, logger *slog.
 		logger:    logger,
 		dbHandler: dbHandler,
 		port:      port,
-		jobMgr:    jobMgr,
+		hub:       hub,
 	}
 
 	s.profiles = NewProfileManager(store, cfg.Proxy.ListenAddr, cfg.Proxy.FailThreshold, logger)
-	s.optimizer = NewOptimizer(store, &cfg.Pipeline, s.profiles, logger, jobMgr.Broadcast, jobMgr.Running)
+	s.optimizer = NewOptimizer(store, s.profiles, logger, hub.Broadcast)
 
 	return s
 }
@@ -74,6 +73,10 @@ func (s *Server) Start(ctx context.Context) error {
 	fileServer := http.FileServer(http.FS(subFS))
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" && r.URL.Query().Get("state") != "" {
+			s.handleLoginCallback(w, r) // the OAuth provider redirects back to the dashboard root
+			return
+		}
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
 			data, err := fs.ReadFile(subFS, "index.html")
 			if err != nil {
@@ -91,10 +94,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// 2. REST API endpoints
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/configs", s.handleConfigs)
-	mux.HandleFunc("/api/test", s.handleTest)
-	mux.HandleFunc("/api/test/stream", s.handleTestStream)
-	mux.HandleFunc("/api/test/cancel", s.handleTestCancel)
-	mux.HandleFunc("/api/dedup", s.handleDedup)
+	mux.Handle("/api/events", s.hub)
 
 	// Application Logs API
 	mux.HandleFunc("/api/logs", s.handleLogs)
@@ -107,16 +107,21 @@ func (s *Server) Start(ctx context.Context) error {
 	// Subscription sources, profiles and the background optimizer
 	mux.HandleFunc("/api/sources", s.handleSources)
 	mux.HandleFunc("/api/sources/toggle", s.handleSourceToggle)
+	mux.HandleFunc("/api/sources/paste", s.handleSourcePaste)
 	mux.HandleFunc("/api/sources/delete", s.handleSourceDelete)
 	mux.HandleFunc("/api/profiles", s.handleProfiles)
-	mux.HandleFunc("/api/profiles/delete", s.handleProfileDelete)
+	mux.HandleFunc("/api/profiles/test", s.handleProfileTest)
+	mux.HandleFunc("/api/profiles/results", s.handleProfileResults)
+	mux.HandleFunc("/api/profiles/active", s.handleProfileActive)
+	mux.HandleFunc("/api/profiles/login", s.handleProfileLogin)
+	mux.HandleFunc("/api/profiles/logout", s.handleProfileLogout)
 	mux.HandleFunc("/api/optimizer", s.handleOptimizer)
 	mux.HandleFunc("/api/optimizer/run", s.handleOptimizerRun)
 
-	// Benchmark Methodology Chain API
-	mux.HandleFunc("/api/benchmark/methodology", s.handleBenchmarkMethodology)
-
 	// Start profile listeners and the background optimizer
+	if err := s.seedProfiles(); err != nil {
+		return err
+	}
 	if err := s.profiles.Sync(); err != nil {
 		return err
 	}
@@ -183,18 +188,12 @@ func (s *Server) handleConfigs(w http.ResponseWriter, r *http.Request) {
 	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
 	search := strings.TrimSpace(q.Get("search"))
-	workingOnly := q.Get("working_only") == "true" || q.Get("working_only") == "1"
-	sortBy := q.Get("sort_by")
-	sortOrder := q.Get("sort_order")
-
 	filter := storage.ConfigQueryFilter{
-		Protocol:    protocol,
-		Search:      search,
-		WorkingOnly: workingOnly,
-		SortBy:      sortBy,
-		SortOrder:   sortOrder,
-		Limit:       limit,
-		Offset:      offset,
+		Protocol: protocol,
+		Search:   search,
+		SortBy:   q.Get("sort_by"),
+		Limit:    limit,
+		Offset:   offset,
 	}
 
 	items, total, err := s.store.QueryConfigs(filter)
@@ -204,158 +203,10 @@ func (s *Server) handleConfigs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"configs":      items,
-		"total":        total,
-		"limit":        limit,
-		"offset":       offset,
-		"working_only": workingOnly,
-		"sort_by":      sortBy,
-		"sort_order":   sortOrder,
-	})
-}
-
-// API: Test / Benchmark (Starts asynchronous test runner)
-func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	var req struct {
-		Target   string `json:"target"`
-		Threads  int    `json:"threads"`
-		Protocol string `json:"protocol"`
-		Scope    string `json:"scope"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	req.Target = strings.TrimSpace(req.Target)
-	if req.Target == "" {
-		req.Target = "https://www.google.com/generate_204"
-	}
-	if !strings.HasPrefix(req.Target, "http://") && !strings.HasPrefix(req.Target, "https://") {
-		req.Target = "https://" + req.Target
-	}
-	if req.Threads <= 0 {
-		req.Threads = 100
-	} else if req.Threads > 1000 {
-		req.Threads = 1000
-	}
-
-	protoFilter := ""
-	if req.Protocol != "" && req.Protocol != "all" {
-		protoFilter = strings.ToLower(req.Protocol)
-	}
-
-	var configs []*model.ProxyConfig
-	var err error
-
-	switch req.Scope {
-	case "untested":
-		configs, err = s.store.ListConfigsUntested(protoFilter, 0)
-	case "top100":
-		configs, err = s.store.ListConfigsFiltered(protoFilter, 100)
-	case "top500":
-		configs, err = s.store.ListConfigsFiltered(protoFilter, 500)
-	default:
-		// "all" or empty: benchmark all matching configs in database
-		configs, err = s.store.ListConfigsFiltered(protoFilter, 0)
-	}
-
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	if len(configs) == 0 {
-		writeError(w, http.StatusBadRequest, "no configurations match selection to test")
-		return
-	}
-
-	if err := s.jobMgr.Start(req.Target, req.Threads, configs); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":   "started",
-		"target":   req.Target,
-		"threads":  req.Threads,
-		"total":    len(configs),
-		"protocol": req.Protocol,
-		"scope":    req.Scope,
-	})
-}
-
-// API: Test Stream (Server-Sent Events)
-func (s *Server) handleTestStream(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	ch := s.jobMgr.Subscribe()
-	defer s.jobMgr.Unsubscribe(ch)
-
-	flusher.Flush()
-
-	notify := r.Context().Done()
-	for {
-		select {
-		case <-notify:
-			return
-		case msg, ok := <-ch:
-			if !ok {
-				return
-			}
-			w.Write(msg)
-			flusher.Flush()
-		}
-	}
-}
-
-// API: Cancel Test
-func (s *Server) handleTestCancel(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	if s.jobMgr.Cancel() {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
-	} else {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "not_running"})
-	}
-}
-
-// API: Deduplicate
-func (s *Server) handleDedup(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	s.jobMgr.Log("info", "dedup", "Starting database deduplication pass across stored configurations...")
-	scanned, removed, err := s.store.Deduplicate()
-	if err != nil {
-		s.jobMgr.Log("error", "dedup", fmt.Sprintf("Deduplication error: %v", err))
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	s.jobMgr.Log("success", "dedup", fmt.Sprintf("Deduplication complete: %d records scanned, %d duplicates removed", scanned, removed))
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"scanned": scanned,
-		"removed": removed,
+		"configs": items,
+		"total":   total,
+		"limit":   limit,
+		"offset":  offset,
 	})
 }
 
@@ -580,44 +431,6 @@ func (s *Server) handleLogExport(w http.ResponseWriter, r *http.Request) {
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(records)
 }
-
-// API: Get or Save Benchmark Methodology Chain
-func (s *Server) handleBenchmarkMethodology(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		chain, err := s.store.GetBenchmarkMethodology()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"success": true,
-			"chain":   chain,
-		})
-	case http.MethodPost:
-		var chain model.BenchmarkMethodologyChain
-		if err := json.NewDecoder(r.Body).Decode(&chain); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
-			return
-		}
-		if err := chain.Validate(); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if err := s.store.SaveBenchmarkMethodology(&chain); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		s.jobMgr.Log("info", "methodology", fmt.Sprintf("Updated benchmark methodology: %d steps, scoring_mode=%s", len(chain.Steps), chain.ScoringMode))
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"success": true,
-			"chain":   chain,
-		})
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-	}
-}
-
 
 // localOnly rejects requests that did not come from the dashboard itself.
 // The API has no login (admins reach it through an SSH tunnel), so this blocks

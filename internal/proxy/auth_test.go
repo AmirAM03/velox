@@ -12,7 +12,7 @@ import (
 )
 
 func TestServer_Auth(t *testing.T) {
-	sel := NewSelector(nil, 5, 2, nil)
+	sel := NewSelector(2, nil)
 	sel.SetPool([]*model.ProxyConfig{{ID: "a"}})
 	srv := NewServer("127.0.0.1", 0, "alice", "s3cret", &mockEngine{}, sel, nil)
 	if err := srv.Start(); err != nil {

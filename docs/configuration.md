@@ -1,6 +1,6 @@
 # Velox Configuration Guide
 
-Velox is designed to run out-of-the-box with sensible zero-configuration defaults. However, every aspect of the pipeline, proxy engine, scoring algorithms, and targets can be customized via `config.yaml`.
+Velox is designed to run out-of-the-box with sensible zero-configuration defaults. The file only holds process-level settings; sources, profiles (built-in types) and the test schedule are managed in the dashboard. The benchmark limits are fixed constants (see the [architecture guide](architecture.md#3-per-profile-benchmark)).
 
 ---
 
@@ -30,68 +30,11 @@ data_dir: ""
 log_level: "info"
 
 # ------------------------------------------------------------------------------
-# Multi-Stage Testing Pipeline Settings
-# ------------------------------------------------------------------------------
-pipeline:
-  # Stage 0: DNS Resolution & TCP Ping
-  stage0_workers: 2000          # Max concurrent workers for TCP dial
-  stage0_timeout: "1.5s"        # TCP connect timeout
-
-  # Stage 1: TLS / REALITY Handshake
-  stage1_workers: 500           # Max concurrent workers for TLS handshake
-  stage1_timeout: "2.5s"        # TLS handshake timeout
-
-  # Stage 2: Functional In-Process Proxy Test (Real Delay)
-  stage2_workers: 150           # Max concurrent workers for proxy HTTP requests
-  stage2_timeout: "5.0s"        # HTTP request timeout through the proxy
-
-  # Adaptive concurrency throttling based on network error rates
-  adaptive_concurrency: true
-  timeout_rate_high: 0.15       # Reduce workers if >15% requests timeout
-  timeout_rate_low: 0.05        # Increase workers if <5% requests timeout
-
-  # Per-host rate limiting (prevents overwhelming single CDN/edge IPs)
-  per_host_rate_limit: 5        # Max concurrent connections per target host IP
-  per_host_cooldown: "500ms"    # Cooldown between batches to same host
-
-# ------------------------------------------------------------------------------
-# Profile Proxy Listeners (ports, users and targets are set per profile in the dashboard)
+# Profile Proxy Listeners (ports, users and sessions are set per profile in the dashboard)
 # ------------------------------------------------------------------------------
 proxy:
   listen_addr: "0.0.0.0"        # Address every profile port binds to
   fail_threshold: 3             # Consecutive dial failures before failing over to the next-best node
-
-# ------------------------------------------------------------------------------
-# Target URLs for Real Delay & Delay Benchmarking
-# ------------------------------------------------------------------------------
-targets:
-  # Destination URLs probed during Stage 2 testing
-  urls:
-    - "https://www.google.com/generate_204"
-    - "https://cp.cloudflare.com/generate_204"
-    - "https://www.gstatic.com/generate_204"
-
-  # Expected HTTP status codes considered successful
-  expect_status:
-    - 200
-    - 204
-
-  # Optional payload URL used for throughput benchmarking
-  speed_test_url: "https://speed.cloudflare.com/__down?bytes=10485760"
-
-  # Hostname used for proxy DNS leak / resolution testing
-  dns_test_host: "google.com"
-
-# ------------------------------------------------------------------------------
-# Smart Composite Scoring Weights (Weights must sum to 1.0)
-# ------------------------------------------------------------------------------
-scoring:
-  weight_latency: 0.30          # Weight assigned to P95 latency
-  weight_success: 0.30          # Weight assigned to test success rate
-  weight_throughput: 0.15       # Weight assigned to throughput
-  weight_stability: 0.15        # Weight assigned to connection stability
-  weight_recency: 0.10          # Weight assigned to test recency
-  stability_decay: 0.80         # Exponential decay factor for stability penalty
 
 # ------------------------------------------------------------------------------
 # Diagnostic & Profiling Settings
@@ -103,43 +46,7 @@ debug:
 
 ---
 
-## 3. Recommended Optimization Profiles
-
-### Profile A: Low-Resource VPS (512MB RAM / 1 vCPU)
-When running Velox on a budget cloud instance or low-memory virtual machine:
-
-```yaml
-pipeline:
-  stage0_workers: 200
-  stage1_workers: 50
-  stage2_workers: 20
-  adaptive_concurrency: true
-
-proxy:
-  warm_pool_size: 2
-  health_interval: "60s"
-```
-
-### Profile B: High-Performance Desktop / Server (Multi-Core / Gigabit)
-For scanning large subscription pools (10,000+ nodes) in seconds:
-
-```yaml
-pipeline:
-  stage0_workers: 4000
-  stage0_timeout: "1.0s"
-  stage1_workers: 1000
-  stage1_timeout: "2.0s"
-  stage2_workers: 300
-  stage2_timeout: "3.5s"
-
-proxy:
-  warm_pool_size: 10
-  health_interval: "15s"
-```
-
----
-
-## 4. CLI Overrides
+## 3. CLI Overrides
 
 Any configuration file option can be overridden directly on the command line:
 
@@ -148,11 +55,8 @@ Any configuration file option can be overridden directly on the command line:
 velox --data-dir /mnt/storage/velox
 
 # Override log level
-velox --log-level debug test
+velox --log-level debug
 
-# Override target URLs on test command
-velox test --target "https://www.google.com" --target "https://cloudflare.com"
-
-# Override port on connect command
-velox connect --port 2080 --system
+# Dashboard port (always on 127.0.0.1)
+velox --port 18090
 ```

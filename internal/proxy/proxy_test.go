@@ -8,13 +8,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"testing"
 
 	"github.com/AmirAM03/velox/internal/engine"
 	"github.com/AmirAM03/velox/internal/model"
-	"github.com/AmirAM03/velox/internal/storage"
 )
 
 type mockEngine struct {
@@ -28,63 +26,61 @@ func (m *mockEngine) Dial(ctx context.Context, cfg *model.ProxyConfig, network, 
 	return (&net.Dialer{}).DialContext(ctx, network, addr)
 }
 
-func (m *mockEngine) TestTLSHandshake(ctx context.Context, cfg *model.ProxyConfig) error {
-	return nil
-}
-
 func (m *mockEngine) Close() error {
 	return nil
 }
 
 var _ engine.Engine = (*mockEngine)(nil)
 
-func TestSelector_WarmPoolAndFailover(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "selector_test.db")
-	store, err := storage.Open(dbPath, nil)
-	if err != nil {
-		t.Fatalf("open storage: %v", err)
+// Failover walks the ranking in order and wraps around, so two dead nodes at
+// the top cannot trap a profile between them.
+func TestSelector_FailoverWalksRanking(t *testing.T) {
+	a, b, c := &model.ProxyConfig{ID: "a"}, &model.ProxyConfig{ID: "b"}, &model.ProxyConfig{ID: "c"}
+	sel := NewSelector(2, nil)
+	if sel.RecordFailure("x") || sel.Active() != nil {
+		t.Fatal("empty selector must not switch")
 	}
-	defer store.Close()
+	sel.SetPool([]*model.ProxyConfig{a, b, c})
 
-	cfg1 := &model.ProxyConfig{ID: "cfg-1", Name: "Primary", Protocol: model.ProtocolVLESS}
-	cfg2 := &model.ProxyConfig{ID: "cfg-2", Name: "Secondary", Protocol: model.ProtocolVMess}
-
-	_ = store.UpsertConfig(cfg1)
-	_ = store.UpsertConfig(cfg2)
-	_ = store.UpsertScore(&model.Score{ConfigID: "cfg-1", Composite: 0.1})
-	_ = store.UpsertScore(&model.Score{ConfigID: "cfg-2", Composite: 0.2})
-
-	sel := NewSelector(store, 5, 2, nil)
-	if err := sel.RefreshWarmPool(); err != nil {
-		t.Fatalf("RefreshWarmPool: %v", err)
-	}
-
-	if sel.Active() == nil || sel.Active().ID != "cfg-1" {
-		t.Errorf("expected initial active config to be cfg-1, got %v", sel.Active())
+	want := []string{"a", "b", "c", "a"}
+	for i, id := range want {
+		if got := sel.Active().ID; got != id {
+			t.Fatalf("step %d: active %s, want %s", i, got, id)
+		}
+		if sel.RecordFailure("x") {
+			t.Fatalf("step %d: switched after one failure, limit is 2", i)
+		}
+		if !sel.RecordFailure("x") {
+			t.Fatalf("step %d: no switch at the limit", i)
+		}
 	}
 
-	// Record single failure (below limit of 2) -> no failover
-	switched := sel.RecordFailure("timeout")
-	if switched {
-		t.Errorf("should not failover on 1st failure")
+	sel.RecordFailure("x")
+	sel.RecordSuccess() // a success resets the count
+	if sel.RecordFailure("x") {
+		t.Error("switched although a success came between failures")
 	}
-	if sel.Active().ID != "cfg-1" {
-		t.Errorf("active should still be cfg-1")
-	}
+}
 
-	// Record 2nd failure -> trigger failover to cfg-2
-	switched = sel.RecordFailure("timeout")
-	if !switched {
-		t.Errorf("should failover on 2nd failure")
-	}
-	if sel.Active().ID != "cfg-2" {
-		t.Errorf("expected active to switch to cfg-2, got %s", sel.Active().ID)
-	}
+func TestSelector_SetActive(t *testing.T) {
+	a, b, c := &model.ProxyConfig{ID: "a"}, &model.ProxyConfig{ID: "b"}, &model.ProxyConfig{ID: "c"}
+	sel := NewSelector(2, nil)
+	sel.SetPool([]*model.ProxyConfig{a, b, c})
 
-	// Manual switch
-	sel.SelectExplicitly(cfg1)
-	if sel.Active().ID != "cfg-1" {
-		t.Errorf("expected manual switch to cfg-1")
+	if !sel.SetActive("c") || sel.Active().ID != "c" {
+		t.Fatalf("SetActive(c) failed, active=%v", sel.Active())
+	}
+	if sel.SetActive("z") {
+		t.Error("SetActive on a node outside the pool must return false")
+	}
+	if sel.Active().ID != "c" {
+		t.Error("a failed SetActive must leave the active node unchanged")
+	}
+	// A manual switch resets the failure count, so the next failure does not flip nodes.
+	sel.RecordFailure("x")
+	sel.SetActive("a")
+	if sel.RecordFailure("x") {
+		t.Error("failure count should reset on a manual switch")
 	}
 }
 
@@ -105,8 +101,8 @@ func TestServer_SOCKS5_And_HTTP(t *testing.T) {
 	}
 
 	activeCfg := &model.ProxyConfig{ID: "active", Name: "Mock", Protocol: model.ProtocolVLESS}
-	sel := NewSelector(nil, 5, 2, nil)
-	sel.SelectExplicitly(activeCfg)
+	sel := NewSelector(2, nil)
+	sel.SetPool([]*model.ProxyConfig{activeCfg})
 
 	srv := NewServer("127.0.0.1", 0, "", "", eng, sel, nil)
 	if err := srv.Start(); err != nil {

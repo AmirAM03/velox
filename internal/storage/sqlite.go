@@ -42,6 +42,14 @@ func Open(dbPath string, logger *slog.Logger) (*Store, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
+	// New configs are deduplicated on ingest (canonical ID as primary key). This pass only
+	// fixes rows stored under an older ID rule, so it runs once per start, not per fetch.
+	if scanned, merged, err := store.dedupe(); err != nil {
+		logger.Warn("startup deduplication failed", "source", "storage", "error", err)
+	} else if merged > 0 {
+		logger.Info("startup deduplication", "source", "storage", "scanned", scanned, "merged", merged)
+	}
+
 	return store, nil
 }
 
@@ -72,18 +80,8 @@ func (s *Store) migrate() error {
 		// test_results was written on every benchmark but never read; drop it so old DBs stop growing.
 		`DROP TABLE IF EXISTS test_results`,
 
-		`CREATE TABLE IF NOT EXISTS scores (
-			config_id TEXT PRIMARY KEY REFERENCES configs(id) ON DELETE CASCADE,
-			composite REAL NOT NULL DEFAULT 0,
-			latency_score REAL NOT NULL DEFAULT 0,
-			success_score REAL NOT NULL DEFAULT 0,
-			throughput_score REAL NOT NULL DEFAULT 0,
-			stability_penalty REAL NOT NULL DEFAULT 0,
-			recency_bonus REAL NOT NULL DEFAULT 0,
-			test_count INTEGER NOT NULL DEFAULT 0,
-			last_tested_at DATETIME,
-			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`,
+		// Scores belonged to the removed manual benchmark; profiles keep their own ranking.
+		`DROP TABLE IF EXISTS scores`,
 
 		`CREATE TABLE IF NOT EXISTS app_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,7 +118,6 @@ func (s *Store) migrate() error {
 		`CREATE TABLE IF NOT EXISTS profiles (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
-			target_url TEXT NOT NULL,
 			port INTEGER NOT NULL UNIQUE,
 			username TEXT NOT NULL,
 			password TEXT NOT NULL,
@@ -140,6 +137,32 @@ func (s *Store) migrate() error {
 
 	for _, m := range migrations {
 		if _, err := s.db.Exec(m); err != nil {
+			return fmt.Errorf("migration failed: %w\nSQL: %s", err, m)
+		}
+	}
+
+	// Column changes after release. SQLite has no IF [NOT] EXISTS for columns, so
+	// "already done" errors are expected on every start after the first.
+	for _, m := range []string{
+		`ALTER TABLE profiles ADD COLUMN auto_test BOOLEAN NOT NULL DEFAULT 1`,
+		`ALTER TABLE profiles ADD COLUMN test_interval TEXT NOT NULL DEFAULT '30m'`,
+		`ALTER TABLE profiles ADD COLUMN kind TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE profiles ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE profile_nodes ADD COLUMN note TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE profile_nodes ADD COLUMN ok BOOLEAN NOT NULL DEFAULT 1`,
+		`ALTER TABLE profile_nodes ADD COLUMN error TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE profile_nodes ADD COLUMN response TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE profile_nodes DROP COLUMN speed_bps`,
+		// Free-form target-URL profiles became built-in profile types. An old Antigravity
+		// profile becomes the new one, so its port and credentials keep working.
+		`UPDATE profiles SET kind = 'antigravity'
+			WHERE id = (SELECT MIN(id) FROM profiles WHERE kind = '' AND target_url LIKE '%antigravity%')
+			AND NOT EXISTS (SELECT 1 FROM profiles WHERE kind = 'antigravity')`,
+		`ALTER TABLE profiles DROP COLUMN target_url`,
+		`DELETE FROM profiles WHERE kind = ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_kind ON profiles(kind)`,
+	} {
+		if _, err := s.db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "no such column") {
 			return fmt.Errorf("migration failed: %w\nSQL: %s", err, m)
 		}
 	}
@@ -279,138 +302,86 @@ func (s *Store) UpsertConfigs(configs []*model.ProxyConfig) (inserted, updated i
 	return inserted, updated, nil
 }
 
-// Deduplicate scans all configs in the database, recalculates their canonical IDs
-// using model.ProxyConfig.Hash(), removes duplicate entries, and cleans up orphaned scores/results.
-func (s *Store) Deduplicate() (scanned, removed int, err error) {
+// dedupe rewrites every config to its current canonical ID and merges rows that
+// share one. References (profile_nodes) move with the row, so a profile
+// keeps its nodes and no config is lost.
+func (s *Store) dedupe() (scanned, merged int, err error) {
 	rows, err := s.db.Query(`SELECT id, data FROM configs`)
 	if err != nil {
 		return 0, 0, fmt.Errorf("query configs: %w", err)
 	}
-	defer rows.Close()
-
 	type item struct {
-		oldID string
-		cfg   model.ProxyConfig
+		oldID, newID string
+		data         []byte
 	}
-	var all []item
+	var stale []item
+	present := map[string]bool{}
 	for rows.Next() {
-		var oldID, data string
-		if err := rows.Scan(&oldID, &data); err != nil {
-			continue
+		var id, data string
+		if err := rows.Scan(&id, &data); err != nil {
+			rows.Close()
+			return 0, 0, err
 		}
+		scanned++
+		present[id] = true
 		var cfg model.ProxyConfig
-		if err := json.Unmarshal([]byte(data), &cfg); err != nil {
-			continue
+		if json.Unmarshal([]byte(data), &cfg) != nil {
+			continue // unreadable row: leave it, never delete what we cannot parse
 		}
-		all = append(all, item{oldID: oldID, cfg: cfg})
+		cfg.ComputeID()
+		if cfg.ID != id {
+			b, _ := json.Marshal(cfg)
+			stale = append(stale, item{id, cfg.ID, b})
+		}
 	}
 	rows.Close()
-
-	scanned = len(all)
-	if scanned == 0 {
-		return 0, 0, nil
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
+	if len(stale) == 0 {
+		return scanned, 0, nil
 	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
-		return 0, 0, fmt.Errorf("begin tx: %w", err)
+		return 0, 0, err
 	}
 	defer tx.Rollback()
-
-	seenCanonical := make(map[string]string) // canonicalID -> kept oldID
-	var toDelete []string
-
-	for _, it := range all {
-		it.cfg.ComputeID()
-		canonID := it.cfg.ID
-
-		if keptOldID, exists := seenCanonical[canonID]; exists {
-			// Duplicate found! Delete this redundant row
-			toDelete = append(toDelete, it.oldID)
-			s.logger.Debug("deduplicate: removing duplicate config", "duplicate_id", it.oldID, "kept_id", keptOldID)
+	// Keys change in several tables inside this transaction; check them at commit.
+	if _, err := tx.Exec(`PRAGMA defer_foreign_keys = ON`); err != nil {
+		return 0, 0, err
+	}
+	for _, it := range stale {
+		if present[it.newID] {
+			// Another row already holds this identity: it wins, this one merges into it.
+			merged++
 		} else {
-			seenCanonical[canonID] = it.oldID
-			// If oldID != canonID, update ID in DB to canonical
-			if it.oldID != canonID {
-				data, _ := json.Marshal(it.cfg)
-				_, err := tx.Exec(`UPDATE configs SET id = ?, data = ?, updated_at = ? WHERE id = ?`,
-					canonID, string(data), formatDBTime(time.Now()), it.oldID)
-				if err != nil {
-					// Could be unique constraint if canonID was already present
-					toDelete = append(toDelete, it.oldID)
-				}
+			if _, err := tx.Exec(`UPDATE configs SET id = ?, data = ? WHERE id = ?`, it.newID, string(it.data), it.oldID); err != nil {
+				return 0, 0, fmt.Errorf("rename config: %w", err)
 			}
+			present[it.newID] = true
+		}
+		// Move references; where the target already has one, the old one is dropped below.
+		if _, err := tx.Exec(`UPDATE OR IGNORE profile_nodes SET config_id = ? WHERE config_id = ?`, it.newID, it.oldID); err != nil {
+			return 0, 0, fmt.Errorf("move references: %w", err)
+		}
+		if _, err := tx.Exec(`DELETE FROM configs WHERE id = ?`, it.oldID); err != nil { // no-op after a rename
+			return 0, 0, fmt.Errorf("delete duplicate: %w", err)
 		}
 	}
-
-	// Delete identified duplicate rows
-	delStmt, err := tx.Prepare(`DELETE FROM configs WHERE id = ?`)
-	if err == nil {
-		defer delStmt.Close()
-		for _, id := range toDelete {
-			if _, err := delStmt.Exec(id); err == nil {
-				removed++
-			}
-		}
-	}
-
 	if err := tx.Commit(); err != nil {
 		return 0, 0, fmt.Errorf("commit deduplication: %w", err)
 	}
-
-	return scanned, removed, nil
+	return scanned, merged, nil
 }
 
-// UpsertScore inserts or updates a config's score.
-func (s *Store) UpsertScore(score *model.Score) error {
-	_, err := s.db.Exec(`
-		INSERT INTO scores (config_id, composite, latency_score, success_score, throughput_score,
-			stability_penalty, recency_bonus, test_count, last_tested_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(config_id) DO UPDATE SET
-			composite = excluded.composite,
-			latency_score = excluded.latency_score,
-			success_score = excluded.success_score,
-			throughput_score = excluded.throughput_score,
-			stability_penalty = excluded.stability_penalty,
-			recency_bonus = excluded.recency_bonus,
-			test_count = excluded.test_count,
-			last_tested_at = excluded.last_tested_at,
-			updated_at = excluded.updated_at
-	`, score.ConfigID, score.Composite, score.LatencyScore, score.SuccessScore,
-		score.ThroughputScore, score.StabilityPenalty, score.RecencyBonus,
-		score.TestCount, formatDBTime(score.LastTestedAt), formatDBTime(score.UpdatedAt))
-	return err
-}
-
-// ListConfigsFiltered returns configs ordered by score, optionally filtered by protocol.
+// ListConfigsFiltered returns stored configs, optionally of one protocol. limit <= 0 means all.
 func (s *Store) ListConfigsFiltered(protocol string, limit int) ([]*model.ProxyConfig, error) {
 	if limit <= 0 {
 		limit = -1
 	}
-	var query string
-	var args []interface{}
-
-	if protocol != "" {
-		query = `
-			SELECT c.data
-			FROM configs c
-			LEFT JOIN scores s ON c.id = s.config_id
-			WHERE c.protocol = ?
-			ORDER BY COALESCE(s.composite, 999999) ASC
-			LIMIT ?
-		`
-		args = []interface{}{protocol, limit}
-	} else {
-		query = `
-			SELECT c.data
-			FROM configs c
-			LEFT JOIN scores s ON c.id = s.config_id
-			ORDER BY COALESCE(s.composite, 999999) ASC
-			LIMIT ?
-		`
-		args = []interface{}{limit}
-	}
+	query := `SELECT data FROM configs WHERE (? = '' OR protocol = ?) ORDER BY id LIMIT ?`
+	args := []interface{}{protocol, protocol, limit}
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -431,60 +402,6 @@ func (s *Store) ListConfigsFiltered(protocol string, limit int) ([]*model.ProxyC
 		configs = append(configs, &cfg)
 	}
 	return configs, rows.Err()
-}
-
-// ListConfigsUntested returns configs that have never been tested (no score entry yet).
-func (s *Store) ListConfigsUntested(protocol string, limit int) ([]*model.ProxyConfig, error) {
-	if limit <= 0 {
-		limit = -1
-	}
-	var query string
-	var args []interface{}
-
-	if protocol != "" {
-		query = `
-			SELECT c.data
-			FROM configs c
-			LEFT JOIN scores s ON c.id = s.config_id
-			WHERE s.config_id IS NULL AND c.protocol = ?
-			LIMIT ?
-		`
-		args = []interface{}{protocol, limit}
-	} else {
-		query = `
-			SELECT c.data
-			FROM configs c
-			LEFT JOIN scores s ON c.id = s.config_id
-			WHERE s.config_id IS NULL
-			LIMIT ?
-		`
-		args = []interface{}{limit}
-	}
-
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var configs []*model.ProxyConfig
-	for rows.Next() {
-		var data string
-		if err := rows.Scan(&data); err != nil {
-			continue
-		}
-		var cfg model.ProxyConfig
-		if err := json.Unmarshal([]byte(data), &cfg); err != nil {
-			continue
-		}
-		configs = append(configs, &cfg)
-	}
-	return configs, rows.Err()
-}
-
-// ListConfigs returns all configs ordered by score (best first).
-func (s *Store) ListConfigs(limit int) ([]*model.ProxyConfig, error) {
-	return s.ListConfigsFiltered("", limit)
 }
 
 // GetConfigsByIDs returns configs matching the given IDs.
@@ -524,30 +441,6 @@ func (s *Store) GetConfigsByIDs(ids []string) ([]*model.ProxyConfig, error) {
 	return configs, rows.Err()
 }
 
-// GetScore returns the score for a config.
-func (s *Store) GetScore(configID string) (*model.Score, error) {
-	var score model.Score
-	var lastTestedStr, updatedStr sql.NullString
-	err := s.db.QueryRow(`
-		SELECT config_id, composite, latency_score, success_score, throughput_score,
-			stability_penalty, recency_bonus, test_count, last_tested_at, updated_at
-		FROM scores WHERE config_id = ?
-	`, configID).Scan(
-		&score.ConfigID, &score.Composite, &score.LatencyScore, &score.SuccessScore,
-		&score.ThroughputScore, &score.StabilityPenalty, &score.RecencyBonus,
-		&score.TestCount, &lastTestedStr, &updatedStr,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	score.LastTestedAt = parseDBTime(lastTestedStr.String)
-	score.UpdatedAt = parseDBTime(updatedStr.String)
-	return &score, nil
-}
-
 // ConfigCount returns the total number of stored configs.
 func (s *Store) ConfigCount() (int, error) {
 	var count int
@@ -575,7 +468,7 @@ func (s *Store) ConfigCountByProtocol() (map[string]int, error) {
 	return counts, rows.Err()
 }
 
-// DeleteConfig removes a config and its associated results and scores.
+// DeleteConfig removes a config.
 func (s *Store) DeleteConfig(id string) error {
 	_, err := s.db.Exec("DELETE FROM configs WHERE id = ?", id)
 	return err
@@ -605,12 +498,12 @@ type LogQueryFilter struct {
 
 // LogStats provides aggregated statistics about stored application logs.
 type LogStats struct {
-	TotalCount    int64            `json:"total_count"`
-	LevelCounts   map[string]int64 `json:"level_counts"`
-	OldestTime    *time.Time       `json:"oldest_time,omitempty"`
-	NewestTime    *time.Time       `json:"newest_time,omitempty"`
-	Retention     string           `json:"retention"`
-	DBSizeBytes   int64            `json:"db_size_bytes"`
+	TotalCount  int64            `json:"total_count"`
+	LevelCounts map[string]int64 `json:"level_counts"`
+	OldestTime  *time.Time       `json:"oldest_time,omitempty"`
+	NewestTime  *time.Time       `json:"newest_time,omitempty"`
+	Retention   string           `json:"retention"`
+	DBSizeBytes int64            `json:"db_size_bytes"`
 }
 
 // InsertLog inserts a single log record.
@@ -854,196 +747,80 @@ func (s *Store) SetSetting(key, value string) error {
 	return err
 }
 
-// SettingBenchmarkMethodology is the settings key for the test methodology chain.
-const SettingBenchmarkMethodology = "benchmark_methodology"
-
-// GetBenchmarkMethodology reads the saved benchmark methodology chain, returning DefaultMethodologyChain if not found.
-func (s *Store) GetBenchmarkMethodology() (*model.BenchmarkMethodologyChain, error) {
-	val, err := s.GetSetting(SettingBenchmarkMethodology, "")
-	if err != nil || strings.TrimSpace(val) == "" {
-		return model.DefaultMethodologyChain(), nil
-	}
-	chain, err := model.ParseMethodologyChain(val)
-	if err != nil {
-		return model.DefaultMethodologyChain(), nil
-	}
-	return chain, nil
-}
-
-// SaveBenchmarkMethodology validates and stores the benchmark methodology chain in the settings table.
-func (s *Store) SaveBenchmarkMethodology(chain *model.BenchmarkMethodologyChain) error {
-	if chain == nil {
-		return fmt.Errorf("methodology chain cannot be nil")
-	}
-	if err := chain.Validate(); err != nil {
-		return err
-	}
-	data, err := json.Marshal(chain)
-	if err != nil {
-		return fmt.Errorf("marshal methodology chain: %w", err)
-	}
-	return s.SetSetting(SettingBenchmarkMethodology, string(data))
-}
-
 // ConfigQueryFilter specifies parameters for filtering, sorting, and paginating configs.
 type ConfigQueryFilter struct {
-	Protocol    string
-	Search      string
-	WorkingOnly bool
-	SortBy      string // "score", "latency", "name", "protocol", "updated"
-	SortOrder   string // "asc", "desc"
-	Limit       int
-	Offset      int
+	Protocol string
+	Search   string
+	SortBy   string // "updated" (default, newest first), "name", "protocol"
+	Limit    int
+	Offset   int
 }
 
-// ConfigItem represents a proxy config enriched with score, latency, and pool membership.
+// ConfigItem is one stored config as the dashboard lists it.
 type ConfigItem struct {
-	ID          string     `json:"id"`
-	Name        string     `json:"name"`
-	Protocol    string     `json:"protocol"`
-	Address     string     `json:"address"`
-	Port        int        `json:"port"`
-	Network     string     `json:"network"`
-	Security    string     `json:"security"`
-	RawURI      string     `json:"raw_uri"`
-	Score       *float64   `json:"score,omitempty"`
-	LatencyMS   *float64   `json:"latency_ms,omitempty"`
-	SuccessRate *float64   `json:"success_rate,omitempty"`
-	LastTested  *time.Time `json:"last_tested_at,omitempty"`
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Protocol  string    `json:"protocol"`
+	Address   string    `json:"address"`
+	Port      int       `json:"port"`
+	Network   string    `json:"network"`
+	Security  string    `json:"security"`
+	RawURI    string    `json:"raw_uri"`
+	Source    string    `json:"source"`
+	UpdatedAt time.Time `json:"updated_at"` // last time a source listed it
 }
 
-// QueryConfigs executes a high-performance, filtered, sorted, paginated query across configs.
+// QueryConfigs returns one filtered, sorted page of configs and the total match count.
 func (s *Store) QueryConfigs(filter ConfigQueryFilter) ([]*ConfigItem, int64, error) {
-	var conditions []string
-	var args []any
-
-	if filter.Protocol != "" && filter.Protocol != "all" {
-		conditions = append(conditions, "c.protocol = ?")
-		args = append(args, filter.Protocol)
-	}
-
-	if filter.WorkingOnly {
-		conditions = append(conditions, "(s.composite IS NOT NULL AND s.composite < 999999 AND s.success_score == 0.0)")
-	}
-
+	where := `WHERE (? = '' OR protocol = ?)`
+	args := []any{filter.Protocol, filter.Protocol}
 	if filter.Search != "" {
-		conditions = append(conditions, "(c.name LIKE ? OR c.address LIKE ? OR CAST(c.port AS TEXT) LIKE ?)")
+		where += ` AND (name LIKE ? OR address LIKE ? OR CAST(port AS TEXT) LIKE ?)`
 		pattern := "%" + filter.Search + "%"
 		args = append(args, pattern, pattern, pattern)
 	}
 
-	whereClause := ""
-	if len(conditions) > 0 {
-		whereClause = "WHERE " + strings.Join(conditions, " AND ")
-	}
-
-	// 1. Total matching count
-	countQuery := fmt.Sprintf(`
-		SELECT COUNT(*)
-		FROM configs c
-		LEFT JOIN scores s ON c.id = s.config_id
-		%s
-	`, whereClause)
-
 	var total int64
-	if err := s.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM configs `+where, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count configs: %w", err)
 	}
 
-	// 2. Ordering
-	orderDir := "ASC"
-	if strings.ToLower(filter.SortOrder) == "desc" {
-		orderDir = "DESC"
-	}
-
-	var orderBy string
-	switch strings.ToLower(filter.SortBy) {
-	case "latency":
-		orderBy = fmt.Sprintf("(s.latency_score IS NULL) ASC, s.latency_score %s, c.id ASC", orderDir)
+	orderBy := "updated_at DESC, id" // fixed strings only: never user input in ORDER BY
+	switch filter.SortBy {
 	case "name":
-		orderBy = fmt.Sprintf("c.name %s, c.id ASC", orderDir)
+		orderBy = "name, id"
 	case "protocol":
-		orderBy = fmt.Sprintf("c.protocol %s, c.id ASC", orderDir)
-	case "updated":
-		orderBy = fmt.Sprintf("(s.last_tested_at IS NULL) ASC, s.last_tested_at %s, c.id ASC", orderDir)
-	default: // "score"
-		orderBy = fmt.Sprintf("(s.composite IS NULL) ASC, s.composite %s, c.id ASC", orderDir)
+		orderBy = "protocol, id"
 	}
-
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	offset := filter.Offset
-	if offset < 0 {
-		offset = 0
-	}
 
-	dataQuery := fmt.Sprintf(`
-		SELECT c.id, c.name, c.protocol, c.address, c.port, c.raw_uri, c.data,
-		       s.composite, s.latency_score, s.success_score, s.last_tested_at
-		FROM configs c
-		LEFT JOIN scores s ON c.id = s.config_id
-		%s
-		ORDER BY %s
-		LIMIT ? OFFSET ?
-	`, whereClause, orderBy)
-
-	queryArgs := append(args, limit, offset)
-	rows, err := s.db.Query(dataQuery, queryArgs...)
+	rows, err := s.db.Query(`SELECT id, name, protocol, address, port, raw_uri, source, data, updated_at FROM configs `+
+		where+` ORDER BY `+orderBy+` LIMIT ? OFFSET ?`, append(args, limit, max(filter.Offset, 0))...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("query configs: %w", err)
 	}
 	defer rows.Close()
 
-	var items []*ConfigItem
+	items := []*ConfigItem{}
 	for rows.Next() {
 		var item ConfigItem
-		var rawData string
-		var comp, lat, succ sql.NullFloat64
-		var lastTestedStr sql.NullString
-
-		if err := rows.Scan(
-			&item.ID, &item.Name, &item.Protocol, &item.Address, &item.Port,
-			&item.RawURI, &rawData, &comp, &lat, &succ, &lastTestedStr,
-		); err != nil {
+		var data, updated string
+		if err := rows.Scan(&item.ID, &item.Name, &item.Protocol, &item.Address, &item.Port,
+			&item.RawURI, &item.Source, &data, &updated); err != nil {
 			return nil, 0, fmt.Errorf("scan config item: %w", err)
 		}
-
-		if rawData != "" {
-			var cfg model.ProxyConfig
-			if err := json.Unmarshal([]byte(rawData), &cfg); err == nil {
-				item.Network = string(cfg.Network)
-				item.Security = string(cfg.Security)
-				if item.Name == "" {
-					item.Name = cfg.DisplayName()
-				}
+		var cfg model.ProxyConfig
+		if json.Unmarshal([]byte(data), &cfg) == nil {
+			item.Network, item.Security = string(cfg.Network), string(cfg.Security)
+			if item.Name == "" {
+				item.Name = cfg.DisplayName()
 			}
 		}
-
-		if comp.Valid {
-			v := comp.Float64
-			item.Score = &v
-		}
-		if lat.Valid {
-			v := lat.Float64
-			item.LatencyMS = &v
-		}
-		if succ.Valid {
-			// success_score = 0 means 100% success rate
-			rate := (1.0 - succ.Float64) * 100.0
-			if rate < 0 {
-				rate = 0
-			}
-			item.SuccessRate = &rate
-		}
-		if lastTestedStr.Valid && lastTestedStr.String != "" {
-			t := parseDBTime(lastTestedStr.String)
-			item.LastTested = &t
-		}
-
+		item.UpdatedAt = parseDBTime(updated)
 		items = append(items, &item)
 	}
-
 	return items, total, rows.Err()
 }

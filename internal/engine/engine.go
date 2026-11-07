@@ -12,16 +12,12 @@ import (
 
 // Engine is the interface for proxy core operations.
 // It abstracts the underlying proxy engine (Xray-core, sing-box, etc.)
-// so the pipeline and proxy server don't depend on a specific implementation.
+// so the benchmark and proxy server don't depend on a specific implementation.
 type Engine interface {
 	// Dial creates a proxied connection through the given config.
 	// The returned net.Conn tunnels traffic through the proxy server.
 	// The context controls the dial timeout.
 	Dial(ctx context.Context, config *model.ProxyConfig, network, addr string) (net.Conn, error)
-
-	// TestTLSHandshake performs a TLS handshake through the proxy config's
-	// server without sending application data. Used for Stage 1 validation.
-	TestTLSHandshake(ctx context.Context, config *model.ProxyConfig) error
 
 	// Close releases all resources held by the engine.
 	Close() error

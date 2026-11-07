@@ -1,12 +1,18 @@
 package web
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/AmirAM03/velox/internal/checks"
 	"github.com/AmirAM03/velox/internal/storage"
 )
 
@@ -42,7 +48,7 @@ func (s *Server) handleSources(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		s.optimizer.Trigger("refresh")
+		s.optimizer.TriggerRefresh()
 		writeJSON(w, http.StatusOK, map[string]any{"id": id})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -50,6 +56,23 @@ func (s *Server) handleSources(w http.ResponseWriter, r *http.Request) {
 }
 
 // API: enable or disable a source (POST {"id", "enabled"}).
+// handleSourcePaste imports a pasted batch of config URIs or a base64 subscription body.
+func (s *Server) handleSourcePaste(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20) // same cap as a fetched subscription
+	var req struct {
+		Content string `json:"content"`
+	}
+	if !decodePost(w, r, &req) {
+		return
+	}
+	count, inserted, err := s.optimizer.Import(req.Content)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"configs": count, "new": inserted})
+}
+
 func (s *Server) handleSourceToggle(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID      int64 `json:"id"`
@@ -80,7 +103,8 @@ func (s *Server) handleSourceDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
-// API: list profiles with live state (GET) or create/update one (POST; id 0 creates).
+// API: list profiles with live state (GET) or update one (POST). Profiles are the
+// built-in types (checks.Kinds), created at startup; they cannot be added or deleted.
 func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -91,17 +115,20 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, st)
 	case http.MethodPost:
-		var p storage.Profile
-		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		var req storage.Profile
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
-		if err := s.validateProfile(&p); err != nil {
+		p, ok := s.findProfile(w, req.ID)
+		if !ok {
+			return
+		}
+		if err := s.applyProfileEdit(&p, req); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		id, err := s.store.SaveProfile(p)
-		if err != nil {
+		if _, err := s.store.SaveProfile(p); err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				writeError(w, http.StatusConflict, fmt.Sprintf("port %d is used by another profile", p.Port))
 				return
@@ -113,33 +140,106 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		s.optimizer.Trigger("cycle") // find nodes for the new or changed target soon
-		writeJSON(w, http.StatusOK, map[string]any{"id": id})
+		if p.Enabled && p.AutoTest {
+			s.optimizer.TriggerProfile(p.ID) // find nodes with the new settings now
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"id": p.ID})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
-// API: delete a profile (POST {"id"}); its listener stops at once.
-func (s *Server) handleProfileDelete(w http.ResponseWriter, r *http.Request) {
+// ProfileResult is one config the profile's real check looked at, as listed on its card.
+type ProfileResult struct {
+	storage.ProfileNode
+	Name     string `json:"name"`
+	Protocol string `json:"protocol"`
+	Address  string `json:"address"`
+	Port     int    `json:"port"`
+	Network  string `json:"network"`
+	Security string `json:"security"`
+}
+
+// API: every config the profile's last real check looked at (GET ?id=N), labeled:
+// candidates first, best first, then the ones that failed and why.
+func (s *Server) handleProfileResults(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	if _, ok := s.findProfile(w, id); !ok {
+		return
+	}
+	nodes, cfgs, err := s.store.ListProfileNodes(id, false)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]ProfileResult, len(nodes))
+	for i, n := range nodes {
+		c := cfgs[i]
+		out[i] = ProfileResult{ProfileNode: n, Name: c.DisplayName(), Protocol: string(c.Protocol), Address: c.Address,
+			Port: c.Port, Network: string(c.Network), Security: string(c.Security)}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// findProfile returns the stored profile with id, or writes a 404.
+func (s *Server) findProfile(w http.ResponseWriter, id int64) (storage.Profile, bool) {
+	profiles, err := s.store.ListProfiles()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return storage.Profile{}, false
+	}
+	for _, p := range profiles {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	writeError(w, http.StatusNotFound, "profile not found")
+	return storage.Profile{}, false
+}
+
+// API: optimizer status (GET) or schedule settings (POST).
+// handleProfileTest queues the full test flow for one profile.
+func (s *Server) handleProfileTest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID int64 `json:"id"`
 	}
 	if !decodePost(w, r, &req) {
 		return
 	}
-	if err := s.store.DeleteProfile(req.ID); err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+	p, ok := s.findProfile(w, req.ID)
+	if !ok {
 		return
 	}
-	if err := s.profiles.Sync(); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !p.Enabled {
+		writeError(w, http.StatusBadRequest, "enable the profile before testing it")
+		return
+	}
+	if err := s.optimizer.TryTriggerProfile(p.ID); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "queued"})
+}
+
+// API: switch a profile's active node to one of its candidates (POST {id, config_id}).
+func (s *Server) handleProfileActive(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID       int64  `json:"id"`
+		ConfigID string `json:"config_id"`
+	}
+	if !decodePost(w, r, &req) {
+		return
+	}
+	if _, ok := s.findProfile(w, req.ID); !ok {
+		return
+	}
+	if err := s.profiles.SetActive(req.ID, req.ConfigID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
-// API: optimizer status (GET) or schedule settings (POST).
 func (s *Server) handleOptimizer(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -160,7 +260,8 @@ func (s *Server) handleOptimizer(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// API: run now (POST {"kind": "refresh"|"cycle"}).
+// API: fetch all subscriptions now (POST). Profile tests are started from their
+// own cards, never here.
 func (s *Server) handleOptimizerRun(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Kind string `json:"kind"`
@@ -168,29 +269,48 @@ func (s *Server) handleOptimizerRun(w http.ResponseWriter, r *http.Request) {
 	if !decodePost(w, r, &req) {
 		return
 	}
-	if req.Kind != "refresh" && req.Kind != "cycle" {
-		writeError(w, http.StatusBadRequest, `kind must be "refresh" or "cycle"`)
+	if req.Kind != "refresh" {
+		writeError(w, http.StatusBadRequest, `kind must be "refresh"`)
 		return
 	}
-	s.optimizer.Trigger(req.Kind)
-	writeJSON(w, http.StatusOK, map[string]any{"status": "queued", "kind": req.Kind})
+	if err := s.optimizer.TryTriggerRefresh(); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "queued", "kind": "refresh"})
 }
 
-// validateProfile normalizes and checks a profile before it is saved.
-// Profiles listen on a public address, so credentials are mandatory.
-func (s *Server) validateProfile(p *storage.Profile) error {
-	p.Name = strings.TrimSpace(p.Name)
-	p.TargetURL = strings.TrimSpace(p.TargetURL)
-	p.Username = strings.TrimSpace(p.Username)
-	if p.Name == "" {
-		return fmt.Errorf("name is required")
+// applyProfileEdit copies the editable fields of req onto the stored profile p and
+// checks the result. A secret setting left empty keeps its saved value, because the
+// dashboard never receives secrets. Profiles listen on a public address, so
+// credentials are mandatory, and an enabled profile needs settings its type accepts.
+func (s *Server) applyProfileEdit(p *storage.Profile, req storage.Profile) error {
+	kind, ok := checks.Get(p.Kind)
+	if !ok {
+		return fmt.Errorf("unknown profile type %q", p.Kind)
 	}
-	if !strings.Contains(p.TargetURL, "://") {
-		p.TargetURL = "https://" + p.TargetURL
+	p.Port, p.Username, p.Password = req.Port, strings.TrimSpace(req.Username), req.Password
+	p.Enabled, p.AutoTest = req.Enabled, req.AutoTest
+	p.TestInterval = strings.TrimSpace(req.TestInterval)
+	if p.TestInterval == "" {
+		p.TestInterval = "30m"
 	}
-	if err := checkHTTPURL(p.TargetURL); err != nil {
-		return fmt.Errorf("target: %w", err)
+	if d, err := time.ParseDuration(p.TestInterval); err != nil || d < time.Minute {
+		return fmt.Errorf("auto-test interval must be a duration of at least 1m (e.g. 30m)")
 	}
+	settings := maps.Clone(p.Settings) // keeps what sign-in stored, such as the account
+	for _, f := range kind.Fields {
+		v := strings.TrimSpace(req.Settings[f.Key])
+		if v == "" && f.Secret {
+			continue
+		}
+		settings[f.Key] = v
+		if kind.Login != nil && f.Key == kind.Login.TokenField {
+			delete(settings, checks.AccountKey) // a pasted session is not the signed-in account
+		}
+	}
+	p.Settings = settings
+
 	if p.Port < 1 || p.Port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535")
 	}
@@ -202,6 +322,51 @@ func (s *Server) validateProfile(p *storage.Profile) error {
 	}
 	if strings.Contains(p.Username, ":") || len(p.Username) > 255 || len(p.Password) > 255 {
 		return fmt.Errorf("username must not contain ':' and both fields must be at most 255 characters")
+	}
+	if p.Enabled {
+		if _, err := kind.New(p.Settings); err != nil {
+			return fmt.Errorf("%s settings: %w", kind.Name, err)
+		}
+	}
+	return nil
+}
+
+// seedProfiles creates the profile of every built-in type that has none yet:
+// disabled, on the first free port from 20001, with a random password.
+func (s *Server) seedProfiles() error {
+	profiles, err := s.store.ListProfiles()
+	if err != nil {
+		return err
+	}
+	used := map[int]bool{s.port: true}
+	have := map[string]storage.Profile{}
+	for _, p := range profiles {
+		used[p.Port] = true
+		have[p.Kind] = p
+	}
+	for _, k := range checks.Kinds {
+		if p, ok := have[k.ID]; ok {
+			if p.Name != k.Name { // e.g. a migrated profile keeps its port, takes the type's name
+				p.Name = k.Name
+				if _, err := s.store.SaveProfile(p); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		port := 20001
+		for used[port] {
+			port++
+		}
+		used[port] = true
+		pw := make([]byte, 12)
+		if _, err := rand.Read(pw); err != nil {
+			return err
+		}
+		if _, err := s.store.SaveProfile(storage.Profile{Kind: k.ID, Name: k.Name, Port: port, Username: "velox",
+			Password: hex.EncodeToString(pw), AutoTest: true, Settings: map[string]string{}}); err != nil {
+			return fmt.Errorf("create %s profile: %w", k.Name, err)
+		}
 	}
 	return nil
 }

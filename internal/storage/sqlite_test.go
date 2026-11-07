@@ -81,39 +81,13 @@ func TestStorage_Lifecycle(t *testing.T) {
 		t.Errorf("unexpected protocol counts: %+v", pCounts)
 	}
 
-	// 6. Score upsert and retrieval
-	score := &model.Score{
-		ConfigID:     cfg1.ID,
-		Composite:    0.15,
-		LatencyScore: 0.1,
-		SuccessScore: 0.0,
-		TestCount:    2,
-		LastTestedAt: time.Now(),
-		UpdatedAt:    time.Now(),
+	// 6. Listing
+	list, err := store.ListConfigsFiltered("", 0)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("ListConfigsFiltered = %d configs, %v; want 2", len(list), err)
 	}
-	if err := store.UpsertScore(score); err != nil {
-		t.Fatalf("UpsertScore: %v", err)
-	}
-
-	retrievedScore, err := store.GetScore(cfg1.ID)
-	if err != nil {
-		t.Fatalf("GetScore: %v", err)
-	}
-	if retrievedScore == nil || retrievedScore.Composite != 0.15 {
-		t.Errorf("unexpected retrieved score: %+v", retrievedScore)
-	}
-
-	// 7. ListConfigs ordering
-	list, err := store.ListConfigs(10)
-	if err != nil {
-		t.Fatalf("ListConfigs: %v", err)
-	}
-	if len(list) != 2 {
-		t.Fatalf("expected 2 configs in list, got %d", len(list))
-	}
-	// cfg1 has score 0.15, cfg2 has no score (defaults to 999999), so cfg1 should be first
-	if list[0].ID != cfg1.ID {
-		t.Errorf("expected cfg1 to be first, got %s", list[0].ID)
+	if vless, _ := store.ListConfigsFiltered(string(model.ProtocolVLESS), 0); len(vless) != 1 || vless[0].ID != cfg1.ID {
+		t.Errorf("protocol filter returned %v, want only cfg1", vless)
 	}
 
 	// 8. DeleteConfig
@@ -276,105 +250,32 @@ func TestStorage_QueryConfigs(t *testing.T) {
 		t.Fatalf("UpsertConfigs: %v", err)
 	}
 
-	// Score cfg1 (working, latency 80ms) and cfg2 (working, latency 450ms)
-	score1 := &model.Score{
-		ConfigID:     cfg1.ID,
-		Composite:    0.08,
-		LatencyScore: 80.0,
-		SuccessScore: 0.0,
-		TestCount:    1,
-		LastTestedAt: time.Now(),
-		UpdatedAt:    time.Now(),
+	// Default order: most recently listed by a source first.
+	old := time.Now().Add(-time.Hour)
+	cfg3.UpdatedAt = old
+	if _, _, err := store.UpsertConfigs([]*model.ProxyConfig{cfg3}); err != nil {
+		t.Fatal(err)
 	}
-	score2 := &model.Score{
-		ConfigID:     cfg2.ID,
-		Composite:    0.45,
-		LatencyScore: 450.0,
-		SuccessScore: 0.0,
-		TestCount:    1,
-		LastTestedAt: time.Now(),
-		UpdatedAt:    time.Now(),
-	}
-	_ = store.UpsertScore(score1)
-	_ = store.UpsertScore(score2)
-
-	// 1. Test QueryConfigs with WorkingOnly = true
-	items, total, err := store.QueryConfigs(ConfigQueryFilter{WorkingOnly: true})
-	if err != nil {
-		t.Fatalf("QueryConfigs working only: %v", err)
-	}
-	if total != 2 || len(items) != 2 {
-		t.Fatalf("expected 2 working configs, got total=%d, items=%d", total, len(items))
-	}
-	if items[0].ID != "cfg-1" {
-		t.Errorf("expected cfg-1 first (best score), got %s", items[0].ID)
+	items, total, err := store.QueryConfigs(ConfigQueryFilter{})
+	if err != nil || total != 3 || len(items) != 3 || items[2].ID != "cfg-3" {
+		t.Fatalf("default order: total=%d items=%v err=%v, want cfg-3 last", total, items, err)
 	}
 
-	// 2. Test sorting by Latency
-	itemsLat, _, err := store.QueryConfigs(ConfigQueryFilter{
-		SortBy:    "latency",
-		SortOrder: "desc",
-	})
-	if err != nil {
-		t.Fatalf("QueryConfigs latency sort: %v", err)
+	// Protocol filter, search, sort by name, paging.
+	if items, total, _ := store.QueryConfigs(ConfigQueryFilter{Protocol: "trojan"}); total != 1 || items[0].ID != "cfg-2" {
+		t.Errorf("protocol filter: total=%d", total)
 	}
-	if len(itemsLat) != 3 || itemsLat[0].ID != "cfg-2" {
-		t.Errorf("expected cfg-2 first when sorted by latency desc, got %s", itemsLat[0].ID)
+	if items, total, _ := store.QueryConfigs(ConfigQueryFilter{Search: "8443"}); total != 1 || items[0].ID != "cfg-3" {
+		t.Errorf("search by port: total=%d", total)
+	}
+	if items, _, _ := store.QueryConfigs(ConfigQueryFilter{SortBy: "name", Limit: 1, Offset: 1}); len(items) != 1 || items[0].ID != "cfg-2" {
+		t.Errorf("name sort page 2 = %v, want Beta (cfg-2)", items)
+	}
+	// Sort input never reaches SQL as-is.
+	if _, _, err := store.QueryConfigs(ConfigQueryFilter{SortBy: "name; DROP TABLE configs"}); err != nil {
+		t.Errorf("unknown sort should fall back to default, got %v", err)
 	}
 }
-
-func TestStore_BenchmarkMethodology(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test_methodology.db")
-	store, err := Open(dbPath, nil)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer store.Close()
-
-	// 1. Initial should return default chain
-	chain, err := store.GetBenchmarkMethodology()
-	if err != nil {
-		t.Fatalf("GetBenchmarkMethodology initial: %v", err)
-	}
-	if chain == nil || len(chain.Steps) == 0 {
-		t.Fatalf("expected default chain steps, got nil or empty")
-	}
-
-	// 2. Save modified custom chain
-	customChain := &model.BenchmarkMethodologyChain{
-		ScoringMode: model.ScoringModeWeighted,
-		Steps: []model.TestStepConfig{
-			{
-				ID:        "step-url-only",
-				Type:      model.MethodologyHTTPDelay,
-				Name:      "Direct Google TTFB",
-				Enabled:   true,
-				Necessary: true,
-				Priority:  1,
-				Weight:    1.0,
-				IsPrimary: true,
-				TargetURL: "https://www.google.com/generate_204",
-			},
-		},
-	}
-	if err := store.SaveBenchmarkMethodology(customChain); err != nil {
-		t.Fatalf("SaveBenchmarkMethodology: %v", err)
-	}
-
-	// 3. Retrieve and verify
-	loaded, err := store.GetBenchmarkMethodology()
-	if err != nil {
-		t.Fatalf("GetBenchmarkMethodology loaded: %v", err)
-	}
-	if loaded.ScoringMode != model.ScoringModeWeighted {
-		t.Errorf("expected ScoringMode %s, got %s", model.ScoringModeWeighted, loaded.ScoringMode)
-	}
-	if len(loaded.Steps) != 1 || loaded.Steps[0].ID != "step-url-only" {
-		t.Errorf("expected 1 step with id step-url-only, got %+v", loaded.Steps)
-	}
-}
-
-
 
 func TestStore_ProfilesNodesAndPrune(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "prof.db"), nil)
@@ -391,23 +292,33 @@ func TestStore_ProfilesNodesAndPrune(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	id, err := store.SaveProfile(Profile{Name: "p", TargetURL: "https://x", Port: 2000, Username: "u", Password: "p", Enabled: true})
+	id, err := store.SaveProfile(Profile{Kind: "a", Name: "p", Port: 2000, Username: "u", Password: "p", Enabled: true, Settings: map[string]string{"k": "v"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SaveProfile(Profile{Name: "dup", TargetURL: "https://x", Port: 2000, Username: "u", Password: "p"}); err == nil {
+	if _, err := store.SaveProfile(Profile{Kind: "b", Name: "dup", Port: 2000, Username: "u", Password: "p"}); err == nil {
 		t.Error("expected unique-port error")
 	}
-	nodes := []ProfileNode{{ConfigID: "fresh", Rank: 2, LatencyMS: 90, TestedAt: time.Now()}, {ConfigID: "used", Rank: 1, LatencyMS: 40, TestedAt: time.Now()}}
+	if _, err := store.SaveProfile(Profile{Kind: "a", Name: "dup", Port: 2001, Username: "u", Password: "p"}); err == nil {
+		t.Error("expected one profile per kind")
+	}
+	if ps, _ := store.ListProfiles(); len(ps) != 1 || ps[0].Settings["k"] != "v" {
+		t.Errorf("profiles = %+v, want settings kept", ps)
+	}
+	nodes := []ProfileNode{{ConfigID: "fresh", Rank: 2, OK: true, LatencyMS: 90, TestedAt: time.Now()}, {ConfigID: "used", Rank: 1, OK: true, LatencyMS: 40, Label: "DE", Response: `{"ok":true}`, TestedAt: time.Now()},
+		{ConfigID: "stale", Label: "HK", Error: "not eligible", TestedAt: time.Now()}}
 	if err := store.ReplaceProfileNodes(id, nodes); err != nil {
 		t.Fatal(err)
 	}
-	got, cfgs, err := store.ListProfileNodes(id)
-	if err != nil || len(got) != 2 || cfgs[0].ID != "used" || cfgs[1].ID != "fresh" {
-		t.Fatalf("ListProfileNodes = %+v %v %v, want rank order used, fresh", got, cfgs, err)
+	if all, cfgs, _ := store.ListProfileNodes(id, false); len(all) != 3 || cfgs[2].ID != "stale" || all[2].OK || all[2].Label != "HK" {
+		t.Fatalf("all results = %+v, want candidates then the failed one, labeled", all)
+	}
+	got, cfgs, err := store.ListProfileNodes(id, true)
+	if err != nil || len(got) != 2 || cfgs[0].ID != "used" || cfgs[1].ID != "fresh" || got[0].Label != "DE" || got[0].Response != `{"ok":true}` {
+		t.Fatalf("ListProfileNodes = %+v %v %v, want rank order used, fresh with response", got, cfgs, err)
 	}
 
-	// Stale configs go, unless a profile still uses them.
+	// Stale configs go, unless they are a profile's candidates; a failed result does not keep one.
 	pruned, err := store.PruneStaleConfigs(7 * 24 * time.Hour)
 	if err != nil || pruned != 1 {
 		t.Fatalf("pruned=%d err=%v, want 1", pruned, err)
@@ -415,12 +326,80 @@ func TestStore_ProfilesNodesAndPrune(t *testing.T) {
 	if left, _ := store.GetConfigsByIDs([]string{"stale", "used", "fresh"}); len(left) != 2 {
 		t.Errorf("want used+fresh left, got %d configs", len(left))
 	}
+}
 
-	// Deleting the profile cascades to its nodes.
-	if err := store.DeleteProfile(id); err != nil {
+// Free-form target-URL profiles from older versions: an Antigravity one becomes the
+// built-in Antigravity profile (same port and credentials); the others are removed.
+func TestStore_MigratesLegacyProfiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	store, err := Open(path, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _, _ := store.ListProfileNodes(id); len(got) != 0 {
-		t.Errorf("nodes left after profile delete: %d", len(got))
+	for _, q := range []string{
+		`DROP INDEX idx_profiles_kind`, // an old database has neither the index nor kinds
+		`ALTER TABLE profiles ADD COLUMN target_url TEXT NOT NULL DEFAULT ''`,
+		`INSERT INTO profiles (name, target_url, port, username, password) VALUES ('yt', 'https://youtube.com', 3000, 'u', 'p')`,
+		`INSERT INTO profiles (name, target_url, port, username, password) VALUES ('AG', 'https://antigravity.google.com/remote', 3001, 'tobi', 'pw')`,
+	} {
+		if _, err := store.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.Close()
+
+	store, err = Open(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ps, err := store.ListProfiles()
+	if err != nil || len(ps) != 1 || ps[0].Kind != "antigravity" || ps[0].Port != 3001 || ps[0].Username != "tobi" {
+		t.Fatalf("profiles = %+v (err %v), want only the Antigravity one, kept", ps, err)
+	}
+}
+
+// Rows stored under an outdated ID are renamed or merged on open, and the
+// profile nodes pointing at them follow, so nothing is lost.
+func TestStore_DedupeOnOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dedupe.db")
+	store, err := Open(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk := func(addr, id string) *model.ProxyConfig {
+		c := &model.ProxyConfig{Protocol: model.ProtocolVLESS, Address: addr, Port: 443, UUID: "u", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+		c.ComputeID()
+		if id != "" {
+			c.ID = id
+		}
+		return c
+	}
+	a, aDup, bOld := mk("1.1.1.1", ""), mk("1.1.1.1", "old-a"), mk("2.2.2.2", "old-b")
+	if _, _, err := store.UpsertConfigs([]*model.ProxyConfig{a, aDup, bOld}); err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := store.SaveProfile(Profile{Kind: "a", Name: "p", Port: 2000, Username: "u", Password: "p", Enabled: true})
+	if err := store.ReplaceProfileNodes(pid, []ProfileNode{
+		{ConfigID: "old-a", Rank: 1, OK: true, TestedAt: time.Now()},
+		{ConfigID: "old-b", Rank: 2, OK: true, TestedAt: time.Now()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	store, err = Open(path, nil) // dedupe runs here
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	all, _ := store.ListConfigsFiltered("", 0)
+	if len(all) != 2 {
+		t.Fatalf("want 2 configs after merge, got %d", len(all))
+	}
+	_, cfgs, err := store.ListProfileNodes(pid, true)
+	bWant := mk("2.2.2.2", "").ID
+	if err != nil || len(cfgs) != 2 || cfgs[0].ID != a.ID || cfgs[1].ID != bWant {
+		t.Fatalf("profile nodes = %v (err %v), want [%s %s]", cfgs, err, a.ID, bWant)
 	}
 }
